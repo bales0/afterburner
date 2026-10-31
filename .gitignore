@@ -8,3 +8,14 @@ misc
 *.PLD
 *.JED
 *.zip
+
+**/bin/
+**/obj/
+.vs/
+.idea/
+vendor/
+*.user
+*.log
+.pio
+.vscode
+.fake

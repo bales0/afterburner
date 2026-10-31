@@ -37,7 +37,8 @@
                                                                        */
 
 
-#define VERSION "0.6.2"
+#include <EEPROM.h>                                                                    
+#define VERSION "0.6.3"
 
 //#define DEBUG_PES
 //#define DEBUG_VERIFY
@@ -2977,7 +2978,7 @@ void loop() {
           }
           gal = (GALTYPE) type;
           copyGalInfo();
-          if (0 == flagBits & FLAG_BIT_TYPE_CHECK) { //no type check requested
+          if ((flagBits & FLAG_BIT_TYPE_CHECK) == 0) { //no type check requested
             setGalDefaults();
           }
         } else {

@@ -705,7 +705,7 @@ static uint8_t xsvf_player_handle_next_instruction(jtag_port_t* port) {
 #endif  
     xsvf->sirsize_bits =  xsvf_player_get_next_byte();
     if (instruction == XSIR2) {
-      xsvf->sirsize_bits <= 8;
+      xsvf->sirsize_bits <<= 8;
       xsvf->sirsize_bits |= xsvf_player_get_next_byte();
     } 
     xsvf->sirsize_bytes = (xsvf->sirsize_bits + 7) >> 3;

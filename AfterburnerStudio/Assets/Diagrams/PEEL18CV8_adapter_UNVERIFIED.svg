@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="630" viewBox="0 0 1000 630">
+<rect width="1000" height="630" fill="#f4f8fc"/>
+<rect x="20" y="20" width="960" height="590" rx="18" fill="white" stroke="#d5e0e9" stroke-width="3"/>
+<text x="50" y="65" font-family="Arial,DejaVu Sans,sans-serif" font-size="28" fill="#16334f" font-weight="bold">PEEL18CV8: adapter je povinny</text>
+<text x="50" y="94" font-family="Arial,DejaVu Sans,sans-serif" font-size="16" fill="#53697d" font-weight="normal">Pohled shora; natocte skutecnou desku packou vlevo.</text>
+<rect x="140" y="155" width="730" height="355" rx="25" fill="#0d8e99" stroke="#16485a" stroke-width="8"/>
+<rect x="182" y="190" width="642" height="280" rx="7" fill="#d5f3f2" stroke="#26536b" stroke-width="2"/>
+<line x1="145" y1="274" x2="110" y2="155" stroke="#253d51" stroke-width="15" stroke-linecap="round"/>
+<rect x="88" y="126" width="52" height="60" rx="21" fill="#ddebf0" stroke="#253d51" stroke-width="5"/>
+<text x="45" y="309" font-family="Arial,DejaVu Sans,sans-serif" font-size="16" fill="#345167" font-weight="bold">PACKA</text>
+<rect x="210" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="210" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="213" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">1</text>
+<text x="208" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">24</text>
+<rect x="262" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="262" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="265" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">2</text>
+<text x="260" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">23</text>
+<rect x="314" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="314" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="317" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">3</text>
+<text x="312" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">22</text>
+<rect x="366" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="366" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="369" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">4</text>
+<text x="364" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">21</text>
+<rect x="418" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="418" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="421" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">5</text>
+<text x="416" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">20</text>
+<rect x="470" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="470" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="473" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">6</text>
+<text x="468" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">19</text>
+<rect x="522" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="522" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="525" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">7</text>
+<text x="520" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">18</text>
+<rect x="574" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="574" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="577" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">8</text>
+<text x="572" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">17</text>
+<rect x="626" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="626" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="629" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">9</text>
+<text x="624" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">16</text>
+<rect x="678" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="678" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="681" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">10</text>
+<text x="676" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">15</text>
+<rect x="730" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="730" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="733" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">11</text>
+<text x="728" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">14</text>
+<rect x="782" y="214" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<rect x="782" y="395" width="18" height="43" fill="#d8ac4f" stroke="#35495a" stroke-width="1"/>
+<text x="785" y="205" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">12</text>
+<text x="780" y="461" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#22384e" font-weight="bold">13</text>
+<rect x="330" y="260" width="370" height="130" rx="10" fill="#a2d5ba" stroke="#16724f" stroke-width="5"/>
+<rect x="430" y="281" width="180" height="84" rx="10" fill="#23323d"/>
+<text x="444" y="331" font-family="Arial,DejaVu Sans,sans-serif" font-size="22" fill="white" font-weight="bold">PEEL18CV8</text>
+<text x="382" y="379" font-family="Arial,DejaVu Sans,sans-serif" font-size="14" fill="#b91c1c" font-weight="bold">SYMBOLICKE UMISTENI</text>
+<rect x="46" y="523" width="910" height="70" rx="10" fill="#fff0df" stroke="#e0a55b"/>
+<text x="60" y="553" font-family="Arial,DejaVu Sans,sans-serif" font-size="18" fill="#a23d23" font-weight="bold">NEOVERENO: Pin 1 a orientaci adapteru NELZE urcit z tohoto obrazku!</text>
+<text x="60" y="576" font-family="Arial,DejaVu Sans,sans-serif" font-size="15" fill="#84522a" font-weight="normal">Pouzij schema a potisk spravne revize adapteru. Zadny skutecny pinout zde neni.</text>
+</svg>
