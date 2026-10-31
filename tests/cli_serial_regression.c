@@ -32,6 +32,20 @@ int main(void) {
     assert(waitForSerialPrompt(buffer, sizeof(buffer), 40) == -1);
     close_serial();
 
+    // Firmware intentionally returns only a prompt for f/F/g commands.
+    for (const char **cmd = (const char*[]){ "f\r", "F\r", "g1\r", NULL }; *cmd; ++cmd) {
+        start_serial();
+        assert(write(peer, "\r\n>\r\n", 5) == 5);
+        assert(sendGenericCommand(*cmd, "unexpected failure", 300, 0) == 0);
+        close_serial();
+    }
+
+    // An empty response must not be enough to claim a successful program/erase.
+    start_serial();
+    assert(write(peer, "\r\n>\r\n", 5) == 5);
+    assert(sendGenericCommand("w\r", "expected refusal", 300, 0) == -1);
+    close_serial();
+
     start_serial();
     assert(write(peer, "ER first\r\nOK misleading\r\n>\r\n", 29) == 29);
     assert(sendGenericCommand("g1\r", "failed", 300, 0) == -1);

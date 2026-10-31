@@ -997,7 +997,14 @@ char sendGenericCommand(const char* command, const char* errorText, int maxDelay
     } else {
         char* response = stripPrompt(buf);
         char* lastLine = findLastLine(response);
-        int rejected = (lastLine == NULL || lastLine[0] == 0);
+        // Some firmware configuration commands (f/F and g<type>) are deliberately
+        // silent: the complete reply is only "\r\n>\r\n".  An empty response
+        // is valid ONLY for these commands, after sendLine has received the prompt.
+        // Do not relax this check for programming, erase or verification commands.
+        const int silentCommand =
+            ((command[0] == 'f' || command[0] == 'F') && command[1] == '\r' && command[2] == 0) ||
+            (command[0] == 'g' && command[1] != 0 && command[2] == '\r' && command[3] == 0);
+        int rejected = (lastLine == NULL || lastLine[0] == 0) && !silentCommand;
         const char* at = response;
         while (!rejected && *at) {
             while (*at == '\r' || *at == '\n') at++;
