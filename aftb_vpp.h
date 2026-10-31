@@ -110,7 +110,9 @@ static void varVppReadCalib(void) {
 
 // internal use only - set the wiper value on the digital pot
 static void varVppSetVppIndex(uint8_t value) {
+#if VPP_PARANOID
     uint8_t i;
+#endif
 
 #if VPP_VERBOSE
     Serial.print(F("varSetVppIndex "));
@@ -189,12 +191,16 @@ static void varVppSet(uint8_t value) {
 static int16_t varVppMeasureVpp(int8_t printValue) {
     int8_t i = 0;
     uint16_t r1 = 0;
-    int16_t r2; //correction for ADC gain error
+#if defined(SAMPLE_SHIFT) || defined(VPP_ADC_DEBUG_SKEW)
+    int16_t r2; // ADC gain correction or optional diagnostic value
+#endif
 
     while (i++ < SAMPLE_CNT) {
         r1 += analogRead(VPP);
     }
+#if defined(SAMPLE_SHIFT) || defined(VPP_ADC_DEBUG_SKEW)
     r2 = (r1 / (SAMPLE_DIVIDER * SAMPLE_MULTIPLIER));
+#endif
 #ifdef SAMPLE_OFFSET
     r1+= SAMPLE_OFFSET;
 #endif    
@@ -211,7 +217,7 @@ static int16_t varVppMeasureVpp(int8_t printValue) {
         if (a < 10) {
             Serial.print(F("0"));          
         }
-#if 1
+#ifndef VPP_ADC_DEBUG_SKEW
         Serial.println(a);
 #else
         //debug - display the voltage skew value in r2
@@ -376,8 +382,6 @@ static int8_t varVppInit(void) {
 
 //return 1 on success (VPP calibration appears correct), 0 on failure
 static int8_t varVppCheckCalibration(void) {
-    int16_t v;
-    
     varVppReadCalib();
     if (vppWiper[0] == 0) {
         Serial.println(F("I: VPP not calibrated"));
@@ -385,6 +389,7 @@ static int8_t varVppCheckCalibration(void) {
     }
     
 #if 0
+    int16_t v;
     // This shoots the VPP to 9V - in theory no GALs should have an issue with that voltage.
     // Also, the On switch should be turned off, preventing VPP to reach the GAL pins.
     // check actual voltage 
@@ -402,12 +407,13 @@ static int8_t varVppCheckCalibration(void) {
     return OK;
 }
 
-// only for VPP testing and debugging
+// Only compiled when explicitly enabled for VPP diagnostic testing.
+#ifdef VPP_TEST_RAMP
 static void varrVppTestRamp(void) {
-    uint8_t i = 1;
+    uint16_t i = 1; // uint8_t would wrap at 255 and loop forever
 
     while (i < 256) {
-      varVppSetVppIndex(i);
+      varVppSetVppIndex((uint8_t)i);
       delay(400);
       Serial.println(i, DEC);
       varVppMeasureVpp(1);
@@ -415,12 +421,11 @@ static void varrVppTestRamp(void) {
     }
     delay(2000);
     varVppSetVppIndex(0);
-
-
 }
+#endif // VPP_TEST_RAMP
 
 static int8_t varVppCalibrate(void) {
-#if 0 
+#ifdef VPP_TEST_RAMP
     // only for testing and debugging
     varrVppTestRamp();
     return OK;

@@ -26,6 +26,7 @@ public sealed class NativeAfterburner
     public NativeAfterburner(Func<string, ISerialTransport>? transportFactory = null) =>
         _transportFactory = transportFactory ?? (name => new SerialTransport(name));
     private bool _varVpp;
+    private bool _calibrationMissing;
     private const int ResponseMax = 320_000;
 
     public Task<NativeResult> RunAsync(string port, ChipProfile chip, string action, byte[]? fuseBits,
@@ -44,12 +45,15 @@ public sealed class NativeAfterburner
         _clock = Stopwatch.StartNew();
         _output.Clear();
         _varVpp = false;
+        _calibrationMissing = false;
         try
         {
             if (string.IsNullOrWhiteSpace(port)) throw new InvalidOperationException("No serial port selected.");
             _port = _transportFactory(port);
             _port.Open();
             Connect();
+            if (_calibrationMissing && action is not ("s" or "b" or "m"))
+                throw new InvalidOperationException("Variable VPP has no calibration in EEPROM. Calibrate and verify the voltage before programming.");
             if (action is "s" or "b" or "m")
             {
                 RunCalibration(action, offset);
@@ -144,6 +148,7 @@ public sealed class NativeAfterburner
                 if (response.Contains("AFTerburner v.", StringComparison.Ordinal) && response.EndsWith(">\r\n", StringComparison.Ordinal))
                 {
                     _varVpp = response.Contains("varVpp", StringComparison.OrdinalIgnoreCase);
+                    _calibrationMissing = response.Contains("VPP-CAL-MISSING", StringComparison.OrdinalIgnoreCase);
                     Log("Connected firmware: " + response.Split('\n').FirstOrDefault(x => x.Contains("AFTerburner v."))?.Trim());
                     Log(_varVpp ? "Variable VPP board detected." : "Variable VPP was not detected; calibration is unavailable.");
                     return;
@@ -195,7 +200,9 @@ public sealed class NativeAfterburner
         string body = ReadPrompt(TimeSpan.FromSeconds(seconds), largeResponse ? ResponseMax : 16_384, show && !largeResponse);
         string[] lines = body.Replace("\r", "").Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0 && l != ">" && l != command).ToArray();
         // Arduino reports error lines starting ER or "ER ". Do not accept a prompt as success if firmware refused an operation.
-        string? error = lines.FirstOrDefault(l => l.StartsWith("ER", StringComparison.Ordinal));
+        string? error = lines.FirstOrDefault(l =>
+            l.StartsWith("ER", StringComparison.Ordinal) ||
+            l.StartsWith("Error:", StringComparison.OrdinalIgnoreCase));
         if (error is not null) throw new IOException("Firmware rejected command " + command + ": " + error);
         if (show)
         {
@@ -243,8 +250,12 @@ public sealed class NativeAfterburner
             if (nonzero) Command("#f " + bitStart.ToString("D4", CultureInfo.InvariantCulture) + " " + hex, show: false);
             if (bitStart % 512 == 0) _log?.Report($"Uploading fusemap: {Math.Min(bitStart + 32, total)}/{total} bits");
         }
-        Command("#c " + ((ushort)checksum).ToString("X4", CultureInfo.InvariantCulture), show: false);
-        Command("#e", show: false);
+        string checksumReply = Command("#c " + ((ushort)checksum).ToString("X4", CultureInfo.InvariantCulture), show: false);
+        if (!checksumReply.Contains("OK checksum matches", StringComparison.Ordinal))
+            throw new IOException("Firmware did not confirm the uploaded fusemap checksum.");
+        string uploadReply = Command("#e", show: false);
+        if (!uploadReply.Contains("OK upload finished", StringComparison.Ordinal))
+            throw new IOException("Firmware did not confirm completion of the fusemap upload.");
         Log($"Fusemap uploaded: {total} bits; checksum {(ushort)checksum:X4}");
     }
 
@@ -325,6 +336,8 @@ public sealed class NativeAfterburner
             {
                 if (XsvfSucceeded(message))
                 {
+                    if (sent != data.Length)
+                        throw new IOException($"XSVF completed after {sent}/{data.Length} bytes; input may be truncated or contain trailing data.");
                     // Q is emitted before VPP cleanup/readGarbage and the terminal prompt.
                     // Do not send the next j0 until that cleanup has completed.
                     ReadPrompt(TimeSpan.FromSeconds(5), 8192, false);

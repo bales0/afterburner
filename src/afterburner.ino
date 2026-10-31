@@ -38,7 +38,7 @@
 
 
 #include <EEPROM.h>                                                                    
-#define VERSION "0.6.3"
+#define VERSION "0.6.4"
 
 //#define DEBUG_PES
 //#define DEBUG_VERIFY
@@ -389,18 +389,18 @@ typedef struct
 {
     GALTYPE type;
     unsigned char id0,id1;          /* variant 1, variant 2 (eg. 16V8=0x00, 16V8A+=0x1A)*/
-    short fuses;                    /* total number of fuses              */
-    char pins;                      /* number of pins on chip             */
-    char rows;                      /* number of fuse rows                */
+    uint16_t fuses;                /* total number of fuses (nonnegative) */
+    uint8_t pins;                  /* number of pins on chip             */
+    uint8_t rows;                  /* number of fuse rows                */
     unsigned char bits;             /* number of fuses per row            */
-    char uesrow;                    /* UES row number                     */
-    short uesfuse;                  /* first UES fuse number              */
-    char uesbytes;                  /* number of UES bytes                */
-    char eraserow;                  /* row adddeess for erase             */
-    char eraseallrow;               /* row address for erase all (also PES) */
-    char pesrow;                    /* row address for PES read/write     */
-    char pesbytes;                  /* number of PES bytes                */
-    char cfgrow;                    /* row address of config bits (ACW)   */
+    uint8_t uesrow;                /* UES row number                     */
+    uint16_t uesfuse;              /* first UES fuse number              */
+    uint8_t uesbytes;              /* number of UES bytes                */
+    uint8_t eraserow;              /* row address for erase              */
+    uint8_t eraseallrow;           /* row address for erase all (also PES) */
+    uint8_t pesrow;                /* row address for PES read/write     */
+    uint8_t pesbytes;              /* number of PES bytes                */
+    uint8_t cfgrow;                /* row address of config bits (ACW)   */
     unsigned short cfgbase;         /* base address of the config bit numbers */
     const unsigned char *cfg;       /* pointer to config bit numbers      */
     unsigned char cfgbits;          /* number of config bits              */
@@ -435,20 +435,9 @@ const static galinfo_t galInfoList[] PROGMEM =
 };
 galinfo_t galinfo __attribute__ ((section (".noinit"))); //preserve data between resets
 
-#ifdef RAM_BIG
-// for ATF750C
-// MAXFUSES = (((171 * 84 bits)  + uesbits + (10*3 + 1 + 10*4 + 5)) + 7) / 8
-//               (14504 + 7) / 8 = 1813
-#define MAXFUSES 1813
-#else
-// Boards with small RAM (< 2.5kB) do not support ATF750C
-// MAXFUSES calculated as the biggest required space to hold the fuse bitmap
-// MAXFUSES = GAL6002 8330 bits = 8330/8 = 1041.25 bytes rounded up to 1042 bytes
-//#define MAXFUSES 1042
-//extra space added for sparse fusemap (just enough to fit erased ATF750C)
-#define MAXFUSES 1332
-#define USE_SPARSE_FUSEMAP
-#endif
+// Both RAM_BIG and small-RAM builds use the same public MAXFUSES symbol.
+// Keep the platform-dependent definitions out of .ino auto-prototype scanning.
+#include "aftb_fusemap_config.h"
 
 
 GALTYPE gal __attribute__ ((section (".noinit"))); //the gal device index pointing to galInfoList, value is preserved between resets
@@ -459,11 +448,14 @@ static uint8_t vpp = 0;
 char echoEnabled;
 unsigned char pes[12];
 char line[32];
-short lineIndex;
+uint8_t lineIndex; // maximum index is 31; saves one SRAM byte on AVR
 char endOfLine;
 char mapUploaded;
 char isUploading;
 char uploadError;
+char uploadChecksumOk;
+char fuseMapOverflow;
+char varVppCalibrationOk;
 unsigned char fusemap[MAXFUSES];
 unsigned char flagBits;
 char varVppExists;
@@ -502,6 +494,7 @@ void printHelp(char full) {
   // indication for PC software that the new board desgin is used
   if (varVppExists) {
     Serial.println(F(" varVpp "));
+    Serial.println(varVppCalibrationOk ? F(" VPP-CAL-OK ") : F(" VPP-CAL-MISSING "));
   }
 #ifdef RAM_BIG
     Serial.println(F(" RAM-BIG "));
@@ -654,6 +647,8 @@ static void setPinMux(uint8_t pm) {
     break;
 #endif /* CFG_USE_GAL600X */
 
+  default: // UNKNOWN/sentinel: no pin assignment
+    break;
   }
 }
 
@@ -713,6 +708,9 @@ void setup() {
   endOfLine = 0;
   echoEnabled = 0;
   mapUploaded = 0;
+  uploadChecksumOk = 0;
+  fuseMapOverflow = 0;
+  varVppCalibrationOk = 0;
   lineIndex = 0;
   setFlagBit(FLAG_BIT_TYPE_CHECK, 1); //do type check
 
@@ -731,7 +729,8 @@ void setup() {
 
   if (varVppExists) {
     // reads the calibration values
-    if (varVppCheckCalibration()) {
+    varVppCalibrationOk = varVppCheckCalibration();
+    if (varVppCalibrationOk) {
       Serial.println(F("I: VPP calib. OK"));
     }
     // set shift reg Chip select
@@ -792,7 +791,7 @@ char handleTerminalCommands() {
         Serial.print(c);
       }
     }
-    if (lineIndex >= sizeof(line)- 2) {
+    if (lineIndex >= (uint8_t)(sizeof(line) - 2)) {
       lineIndex = 0;
       readGarbage();
       Serial.println();
@@ -823,6 +822,10 @@ char handleTerminalCommands() {
       Serial.println();
       line[lineIndex] = 0;
       lineIndex = 0;
+    } else if (lineIndex < (uint8_t)sizeof(line)) {
+      // Upload lines must also be terminated; otherwise a short malformed
+      // command can parse stale bytes left by an earlier serial command.
+      line[lineIndex] = 0;
     }
     // cancel exercising if unexpected command is received
     if (isExercising && (!(c == COMMAND_EXERCISE || c == COMMAND_EXERCISE_SET_PINS))) {
@@ -843,7 +846,7 @@ char handleTerminalCommands() {
 
 // Parses decimal integer number typed as 4 or 5 digits.
 // Returns the number value.
-unsigned short parse45dec(char i, char five) {
+unsigned short parse45dec(uint8_t i, char five) {
   unsigned short v = 0;
   if (five) { //containts 5 digits
     v = (line[i++] - '0') * 10000;
@@ -865,7 +868,7 @@ unsigned char toHex(char c) {
 
 // Parses hexdecimal integer number typed as 2 digit.
 // Returns the number value.
-unsigned short parse2hex(char i) {
+unsigned short parse2hex(uint8_t i) {
   if (line[i] == '\r' || line[i] ==  0 || line[i] == ' ') {
     return -1; 
   }
@@ -876,7 +879,7 @@ unsigned short parse2hex(char i) {
 
 // Parses hexdecimal integer number typed as 4 digit.
 // Returns the number value.
-unsigned short parse4hex(char i) {
+unsigned short parse4hex(uint8_t i) {
   unsigned short v;
   if (line[i] == '\r' || line[i] ==  0 || line[i] == ' ') {
     return -1; 
@@ -908,7 +911,8 @@ unsigned short parse4hex(char i) {
 void parseUploadLine() {
   switch (line[1]) {
     case 'e': {
-      if (uploadError) {
+      mapUploaded = (!uploadError && uploadChecksumOk && !fuseMapOverflow);
+      if (uploadError || fuseMapOverflow) {
         Serial.print(F("ER upload failed"));
       } else {
         Serial.print(F("OK upload finished"));
@@ -919,9 +923,13 @@ void parseUploadLine() {
     // gal type
     case 't': {
       short v = line[3] - '0';
+      uploadChecksumOk = 0;
       if (v > 0 && v < LAST_GAL_TYPE) {
         gal = (GALTYPE) v;
         copyGalInfo();
+        // Upload begins with 'u' before '#t'. Reinitialize the sparse index for
+        // the selected chip: the previous chip may have been non-sparse.
+        sparseSetup(1);
         Serial.print(F("OK gal set: "));
         Serial.println((short) gal, DEC);
       } else {
@@ -940,13 +948,18 @@ void parseUploadLine() {
 
       addr = parse45dec(3, fiveDigitAddr);
       i += fiveDigitAddr;
+      uploadChecksumOk = 0;
+      const uint16_t allowedFuses = galinfo.fuses + ((flagBits & FLAG_BIT_APD) ? 1 : 0);
 
       do {
         v = parse2hex(i);
         if (v >= 0) {
           for (j = 0; j < 8; j++) {
             // if fuse bit is set -> then change the fusemap
-            if (v & (1 << j)) {
+            if (addr >= allowedFuses) {
+              // Accept zero padding in the final byte, never nonzero out-of-range bits.
+              if (v & (1 << j)) uploadError = 1;
+            } else if (!uploadError && (v & (1 << j))) {
               setFuseBit(addr);
             }
             addr++;
@@ -955,9 +968,9 @@ void parseUploadLine() {
         }
       } while (v >= 0);
 
-      //any fuse being set is considered as uploaded fuse map
-      mapUploaded = 1;
-
+      if (fuseMapOverflow) uploadError = 1;
+      // Fusemap becomes usable only after a matching checksum and #e.
+      if (uploadError) Serial.println(F("ER fusemap data rejected"));
       Serial.print(F("OK "));
       Serial.println((short) addr, DEC);
     } break;
@@ -967,13 +980,13 @@ void parseUploadLine() {
       unsigned short val = parse4hex(3);
       unsigned char apdFuse = (flagBits & FLAG_BIT_APD) ? 1 : 0;
       unsigned short cs = checkSum(galinfo.fuses + apdFuse);
-      if (cs == val) {
+      if (!uploadError && !fuseMapOverflow && cs == val) {
         Serial.println(F("OK checksum matches"));
-        // Conditioning jed files might not have any fuse set, so as long as
-        // they supply empty checksum (C0000) the upload is OK.
-        mapUploaded = 1;
+        // An all-zero conditioning fusemap is valid if its checksum matches.
+        uploadChecksumOk = 1;
       } else {
         uploadError = 1;
+        uploadChecksumOk = 0;
         Serial.print(F("ER checksum:"));
         Serial.print(cs, HEX);
         Serial.print(F(" expected:"));
@@ -1374,6 +1387,8 @@ static void strobeRow(char row, char setBit = BIT_NONE)
       strobe(2);           // pulse /STB for 2ms
       break;
 #endif
+    default: // other device types use their own programming method
+      break;
    }
 }
 
@@ -1387,6 +1402,8 @@ static void strobeConfigRow(char row)
       setSDIN(1);          // SDIN high
       setSTB(0);
       setSTB(1);           // pulse /STB
+      break;
+    default: // only ATF750C uses this sequence
       break;
    }
 }
@@ -1678,10 +1695,19 @@ void printPes(char type) {
 // expects that the fusemap was cleared (set to zero) beforehand
 static void setFuseBit(unsigned short bitPos) {
     uint16_t pos;
+    if (fuseMapOverflow || bitPos >= galinfo.fuses + ((flagBits & FLAG_BIT_APD) ? 1 : 0)) {
+      fuseMapOverflow = 1;
+      return;
+    }
     if (sparseFusemapStat) {
       pos = sparseSetFuseBit(bitPos);
     } else {
-      pos = bitPos >> 3; //divide the bit position by 8 to get the byte position
+      pos = bitPos >> 3; // divide fuse bit number by 8
+    }
+    if (pos == 0xFF01) return; // compressed group already contains all 1 bits
+    if (pos >= sizeof(fusemap)) {
+      fuseMapOverflow = 1;
+      return;
     }
     fusemap[pos] |= (1 << (bitPos & 7));
 }
@@ -1765,7 +1791,7 @@ static unsigned short readOrverifyGalFuseMap(const unsigned char* cfgArray, char
   }
 
   // read fuse rows
-  for(row = 0; row < galinfo.rows; row++) {
+  for(row = 0; row < (uint16_t)galinfo.rows; row++) {
     strobeRow(row);
     if (flagBits & FLAG_BIT_ATF16V8C) {
         setSDIN(0);
@@ -1798,7 +1824,7 @@ static unsigned short readOrverifyGalFuseMap(const unsigned char* cfgArray, char
   if (doDiscardBits) {
     discardBits(doDiscardBits);
   }
-  for(bit = 0; bit < galinfo.uesbytes * 8; bit++) {
+  for(bit = 0; bit < (uint16_t)galinfo.uesbytes * 8U; bit++) {
     addr = galinfo.uesfuse;
     addr += bit;
     errors = readOrVerifyAddress(addr, errors, verify);
@@ -1875,7 +1901,7 @@ static unsigned short readOrverifyGalFuseMap(const unsigned char* cfgArray, char
     }
   }
 
-#if 0
+#ifdef AFTB_SPARSE_STATS
   if ((0 == verify) && sparseFusemapStat) {
     sparsePrintStat();
   }
@@ -1947,11 +1973,12 @@ static unsigned short readOrVerifyGalFuseMap600(const unsigned char* cfgArray, c
 // VERIFY:  reads fuse rows, UES, CFG from GAL and compares with fusemap bit array in RAM.
 static void readOrVerifyGal(char verify)
 {
-  unsigned short i;
+  unsigned short i = 0; // also defined for invalid/sentinel GAL types
   unsigned char* cfgArray = (unsigned char*) cfgV8;
 
   //ensure fusemap is cleared before READ operation, keep it for VERIFY operation.
   if (!verify) {
+    fuseMapOverflow = 0;
     for (i = 0; i < MAXFUSES; i++) {
       fusemap[i] = 0;
     }
@@ -2005,6 +2032,9 @@ static void readOrVerifyGal(char verify)
     case ATF750C:
       //read with delay 1 ms, discard 107 bits on ATF750C
       i = readOrverifyGalFuseMap(galinfo.cfg, 1, galinfo.bits - 8 * galinfo.uesbytes - 1, verify);
+      break;
+    default: // invalid/sentinel types are not readable
+      break;
   }
   if (PEEL18CV8 != gal) {
     turnOff();
@@ -2129,7 +2159,6 @@ static void writeGalFuseMapV10(const unsigned char* cfgArray, char fillUesStart,
 
 // fuse-map writing function for ATF750C chips
 static void writeGalFuseMapV750(const unsigned char* cfgArray) {
-  unsigned short cfgAddr = galinfo.cfgbase;
   unsigned char row, bit;
   unsigned short addr;
   unsigned short uesFill = galinfo.bits - (galinfo.uesbytes * 8) - 1;
@@ -2139,7 +2168,7 @@ static void writeGalFuseMapV750(const unsigned char* cfgArray) {
   // write fuse rows
   setRow(0); //RA0-5 low
   delayMicroseconds(20);
-  for(row = 0; row < galinfo.rows; row++) {
+  for(row = 0; row < (uint16_t)galinfo.rows; row++) {
     for (bit = 0; bit < galinfo.bits; bit++) {
       addr = galinfo.rows;
       if (bit > 84) {
@@ -2287,7 +2316,6 @@ static void writeGalFuseMap600(const unsigned char* cfgArray) {
 // main fuse-map writing function
 static void writeGal()
 {
-  unsigned short i;
   unsigned char* cfgArray = (unsigned char*) cfgV8;
 
   if (PEEL18CV8 != gal) {
@@ -2339,6 +2367,9 @@ static void writeGal()
         break;
     case ATF750C:
         writeGalFuseMapV750(cfgV750);
+        break;
+    default: // invalid/sentinel types are not writable
+        break;
   }
   if (PEEL18CV8 != gal) {
     turnOff();
@@ -2374,7 +2405,7 @@ static void secureGAL(void)
 
 static char checkGalTypeViaPes(void)
 {
-    char type = UNKNOWN;
+    uint8_t type = UNKNOWN; // valid GAL indices are nonnegative
 
 #ifdef DEBUG_PES
     char i;
@@ -2483,18 +2514,6 @@ static void printFormatedNumberDec4(unsigned short num) {
   Serial.print(num, DEC);  
 }
 
-// adds a formated decimal number with a leading zero to a line buffer at position 'i'
-static unsigned char addFormatedNumberDec4(unsigned short num, unsigned char i) {
-  char cnt = 3;
-
-  while (cnt >= 0) {
-    line[i + cnt] = '0' + (num % 10);
-    num /= 10;
-    cnt--;
-  }
-  return i + 4;
-}
-
 // calculates fuse-map checksum and returns it
 static unsigned short checkSum(unsigned short n)
 {
@@ -2583,7 +2602,6 @@ static unsigned printJedecBlock(unsigned short k, unsigned short bits, unsigned 
 static void printJedec()
 {
     unsigned short i, j, k, n;
-    unsigned char unused, start;
     uint8_t apdFuse = (flagBits & FLAG_BIT_APD) ? 1 : 0;
 
     Serial.print(F("JEDEC file for "));
@@ -2600,14 +2618,13 @@ static void printJedec()
       k = printJedecBlock(k, galinfo.bits, galinfo.rows);
     }
 
-    if( k < galinfo.uesfuse) {
+    if (k < galinfo.uesfuse) {
         Serial.print('L');
         printFormatedNumberDec4(k);
         Serial.print(' ');
         
         while(k < galinfo.uesfuse) {
            if (getFuseBit(k)) {
-              unused = 0;
               Serial.print('1');
            } else {
               Serial.print('0');
@@ -2622,7 +2639,7 @@ static void printJedec()
     if (galinfo.uesbytes) {
         Serial.print(F("N UES"));
 
-        for (j = 0;j < galinfo.uesbytes; j++) {
+        for (j = 0; j < (uint16_t)galinfo.uesbytes; j++) {
             n = 0;
             for (i = 0; i < 8; i++) {
                 if (getFuseBit(k + 8 * j + i)) {
@@ -2644,7 +2661,7 @@ static void printJedec()
         printFormatedNumberDec4(k);
         Serial.print(' ');
 
-        for(j = 0; j < 8 * galinfo.uesbytes; j++) {
+        for(j = 0; j < (uint16_t)galinfo.uesbytes * 8U; j++) {
         if (getFuseBit(k++)) {
             Serial.print('1');
         } else {
@@ -2682,7 +2699,7 @@ static void printJedec()
 
     if (galinfo.pesbytes) {
         Serial.print(F("N PES"));
-        for(i = 0; i < galinfo.pesbytes; i++) {
+        for(i = 0; i < (uint16_t)galinfo.pesbytes; i++) {
             Serial.print(' ');
             printFormatedNumberHex2(pes[i]);
         }
@@ -2750,6 +2767,11 @@ static void testVoltage(int seconds) {
 // returns 1 if type check if OK, 0 if gal type does not match the type read from PES
 static char doTypeCheck(void) {
   
+  // Never apply high voltage if the variable-VPP board has no EEPROM map.
+  if (varVppExists && !varVppCalibrationOk) {
+    Serial.println(F("ER VPP calibration missing"));
+    return 0;
+  }
   if (0 == (flagBits & FLAG_BIT_TYPE_CHECK) || PEEL18CV8 == gal) {
     setGalDefaults();
     return 1; // no need to do type check
@@ -2795,7 +2817,10 @@ static void calibrateVpp(void) {
     return;
   }
   if (varVppCalibrate()) {
+    varVppCalibrationOk = 1;
     Serial.println(F("Calibration OK"));
+  } else {
+    varVppCalibrationOk = 0;
   }
 }
 
@@ -2838,6 +2863,8 @@ void loop() {
     // any unexpected input when uploading fuse map terminates the upload process
     if (isUploading && command != COMMAND_UTX && command != COMMAND_NONE) {
       Serial.println(F("ER upload aborted"));
+      mapUploaded = 0;
+      uploadChecksumOk = 0;
       isUploading = 0;
       lineIndex = 0;
     }
@@ -2875,6 +2902,9 @@ void loop() {
         sparseSetup(1);
         isUploading = 1;
         uploadError = 0;
+        mapUploaded = 0;
+        uploadChecksumOk = 0;
+        fuseMapOverflow = 0;
       } break;
 
       // command of the upload protocol
@@ -2910,7 +2940,8 @@ void loop() {
       case COMMAND_READ_FUSES : {
         if (doTypeCheck()) {
           readOrVerifyGal(0); //just read, no verification
-          printJedec();
+          if (fuseMapOverflow) Serial.println(F("ER fusemap exceeds SRAM capacity"));
+          else printJedec();
         }
       } break;
 
@@ -3031,6 +3062,10 @@ void loop() {
       } break;
 #if USE_JTAG_PLAYER
       case COMMAND_JTAG_PLAYER: {
+        if (varVppExists && !varVppCalibrationOk) {
+          Serial.println(F("ER VPP calibration missing"));
+          break;
+        }
         startJtagPlayer(line[1] == '1');
         //flush the serial line in case the player ended abruptly
         readGarbage();

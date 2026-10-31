@@ -126,7 +126,7 @@ static void insertFuseGroup(int16_t dataPos, uint16_t bitPos) {
   fuseType[i >> 2] |= (1 << ((i & 0b11) << 1)); // set type 1 at the fuse group record
 
   //shift all data in the fuse map  starting at data pos by 4 bytes (32 bits)
-  if (dataPos < totalFuseBytes) {
+  if (dataPos >= 0 && (uint16_t)dataPos < totalFuseBytes) {
     for (i =  totalFuseBytes - 1; i >= dataPos; i--) {
       fusemap[i + 4] = fusemap[i];
     }
@@ -137,6 +137,10 @@ static void insertFuseGroup(int16_t dataPos, uint16_t bitPos) {
   fusemap[dataPos++] = 0;
   fusemap[dataPos++] = 0;
   fusemap[dataPos] = 0;
+  // Insertion shifts offsets; cached offsets are no longer valid.
+  sparseCacheBitPos = 0;
+  sparseCacheOffset = 0;
+  sparseCacheIndex = 0;
 }
 
 
@@ -187,6 +191,8 @@ static void sparseCompactFuseMap(void) {
 #endif  
 }
 
+// 0xFFFF signals that the compressed fusemap cannot fit into the SRAM buffer.
+// Never return an out-of-range index to the caller in this case.
 static inline uint16_t sparseSetFuseBit(uint16_t bitPos) {
     uint8_t type;
     uint16_t pos;
@@ -200,8 +206,22 @@ static inline uint16_t sparseSetFuseBit(uint16_t bitPos) {
     pos = getFusePositionAndType(bitPos);
     type = pos & 0b11;
     pos >>= 2; //trim the type to get the byte position in fuse map
-    if (type == 0) { //we need to write the bit into a group that has all bits 0 so far
-      insertFuseGroup(pos & 0x7FC, bitPos);
+    if (type == 3) return 0xFF01; // A compacted all-one group is already set.
+    if (type == 0) { // Allocate a previously zero group (4 bytes).
+      if ((sparseFusemapStat & 0x7FF) + 4 > sizeof(fusemap)) {
+        // Dense and fragmented maps may benefit from immediate compaction.
+        sparseCompactFuseMap();
+        uint16_t location = getFusePositionAndType(bitPos);
+        type = location & 0b11;
+        pos = location >> 2;
+      }
+      if (type == 3) return 0xFF01;
+      if (type == 0) {
+        if ((sparseFusemapStat & 0x7FF) + 4 > sizeof(fusemap)) {
+          return 0xFFFF;
+        }
+        insertFuseGroup(pos & 0x7FC, bitPos);
+      }
     }
     return pos;
 }
@@ -221,6 +241,7 @@ static inline uint16_t sparseGetFuseBit(uint16_t bitPos) {
     return pos;
 }
 
+#ifdef AFTB_SPARSE_STATS
 static void sparsePrintStat() {
     Serial.print(F("sp bytes="));
     Serial.println(sparseFusemapStat & 0x7FF, DEC);
@@ -233,6 +254,7 @@ static void sparsePrintStat() {
     Serial.println(sparseCompactAct, DEC);
 #endif
 }
+#endif // AFTB_SPARSE_STATS
 
 static void sparseInit(char clearArray) {
   if (clearArray) {

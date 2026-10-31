@@ -49,7 +49,7 @@ To compile: gcc -g3 -O0 -o afterburner afterburner.c
 #include "serial_port.h"
 #include "exerciser.h"
 
-#define VERSION "v.0.6.2"
+#define VERSION "v.0.6.3"
 
 #ifdef GCOM
 #define VERSION_EXTENDED VERSION "-" GCOM
@@ -388,6 +388,8 @@ static int parseFuseMap(char *ptr) {
     int i, n, type, checksumpos, address, pins, lastfuse;
     int state = 0; // 0=outside JEDEC, 1=skipping comment or unknown, 2=read command
 
+    int checksumPresent = 0;
+    int highestFuseAddress = -1;
     security = 0;
     checksum = 0;
     checksumpos = 0;
@@ -416,6 +418,7 @@ static int parseFuseMap(char *ptr) {
                         state = 7;
                         break;
                     case 'C':
+                        checksumPresent = 1;
                         checksumpos = n;
                         state = 14;
                         break;
@@ -425,7 +428,7 @@ static int parseFuseMap(char *ptr) {
                 break;
             case 3:
                 if (!isdigit(ptr[n])) {
-                    return n;
+                    return -1;
                 }
                 address = ptr[n] - '0';
                 state = 4;
@@ -434,9 +437,10 @@ static int parseFuseMap(char *ptr) {
                 if (isspace(ptr[n])) {
                     state = 6;
                 } else if (isdigit(ptr[n])) {
+                    if (address > MAXFUSES / 10) return -1;
                     address = 10 * address + (ptr[n] - '0');
                 } else {
-                    return n;
+                    return -1;
                 }
                 break;
             case 5:
@@ -444,16 +448,21 @@ static int parseFuseMap(char *ptr) {
                 if (ptr[n] == '0' || ptr[n] == '1') {
                     memset(fusemap, ptr[n] - '0', sizeof(fusemap));
                 } else {
-                    return n;
+                    return -1;
                 }
                 state = 1;
                 break;
             case 6:
                 if (isspace(ptr[n])) break; // ignored
                 if (ptr[n] == '0' || ptr[n] == '1') {
+                    if (address < 0 || address >= MAXFUSES) {
+                        fprintf(stderr, "Invalid JEDEC fuse address at offset %d\n", n);
+                        return -1;
+                    }
+                    highestFuseAddress = address;
                     fusemap[address++] = ptr[n] - '0';
                 } else {
-                    return n;
+                    return -1;
                 }
                 break;
             case 7:
@@ -470,13 +479,13 @@ static int parseFuseMap(char *ptr) {
                 break;
             case 8:
                 if (isspace(ptr[n])) break; // ignored
-                if (!isdigit(ptr[n])) return n;
+                if (!isdigit(ptr[n])) return -1;
                 pins = ptr[n] - '0';
                 state = 10;
                 break;
             case 9:
                 if (isspace(ptr[n])) break; // ignored
-                if (!isdigit(ptr[n])) return n;
+                if (!isdigit(ptr[n])) return -1;
                 lastfuse = ptr[n] - '0';
                 state = 11;
                 break;
@@ -486,21 +495,22 @@ static int parseFuseMap(char *ptr) {
                 } else if (isspace(ptr[n])) {
                     state = 12;
                 } else {
-                    return n;
+                    return -1;
                 }
                 break;
             case 11:
                 if (isdigit(ptr[n])) {
+                    if (lastfuse > MAXFUSES / 10) return -1;
                     lastfuse = 10 * lastfuse + (ptr[n] - '0');
                 } else if (isspace(ptr[n])) {
                     state = 12;
                 } else {
-                    return n;
+                    return -1;
                 }
                 break;
             case 12:
                 if (!isspace(ptr[n])) {
-                    return n;
+                    return -1;
                 }
                 break;
             case 13:
@@ -508,7 +518,7 @@ static int parseFuseMap(char *ptr) {
                 if (ptr[n] == '0' || ptr[n] == '1') {
                     security = ptr[n] - '0';
                 } else {
-                    return n;
+                    return -1;
                 }
                 state = 1;
                 break;
@@ -518,7 +528,7 @@ static int parseFuseMap(char *ptr) {
                     checksum = ptr[n] - '0';
                 } else if (toupper(ptr[n]) >= 'A' && toupper(ptr[n]) <= 'F') {
                     checksum = toupper(ptr[n]) - 'A' + 10;
-                } else return n;
+                } else return -1;
                 state = 15;
                 break;
             case 15:
@@ -528,15 +538,31 @@ static int parseFuseMap(char *ptr) {
                     checksum = 16 * checksum + toupper(ptr[n]) - 'A' + 10;
                 } else if (isspace(ptr[n])) {
                     state = 2;
-                } else return n;
+                } else return -1;
                 break;
             }
     }
 
+    if (lastfuse <= 0 || lastfuse > MAXFUSES || highestFuseAddress >= lastfuse) {
+        fprintf(stderr, "Invalid JEDEC QF or fuse address range.\n");
+        return -1;
+    }
+    if (gal != UNKNOWN) {
+        const int expected = galinfo[gal].fuses;
+        const int legacyUes = galinfo[gal].uesfuse;
+        const int apdExtra = (gal == ATF16V8B || gal == ATF22V10C);
+        if (lastfuse != expected && lastfuse != legacyUes &&
+            !(apdExtra && lastfuse == expected + 1)) {
+            fprintf(stderr, "JEDEC QF=%d does not match selected GAL (expected %d).\n", lastfuse, expected);
+            return -1;
+        }
+    }
     if (lastfuse || pins) {
+        if (lastfuse < 0 || lastfuse > MAXFUSES) return -1;
         int cs = checkSum(lastfuse);
-        if (checksum && checksum != cs) {
-            printf("Checksum does not match! given=0x%04X calculated=0x%04X last fuse=%i\n", checksum, cs, lastfuse);
+        if (checksumPresent && checksum != cs) {
+            fprintf(stderr, "Checksum does not match! given=0x%04X calculated=0x%04X last fuse=%i\n", checksum, cs, lastfuse);
+            return -1;
         }
 
         for (type = 0, i = 1; i < sizeof(galinfo) / sizeof(galinfo[0]); i++) {
@@ -570,7 +596,7 @@ static int parseFuseMap(char *ptr) {
             printf("PD fuse detected: %i\n", fusemap[5892]);
         }
     }
-    return n;
+    return 0;
 }
 
 static char readFile(int* fileSize) {
@@ -582,8 +608,14 @@ static char readFile(int* fileSize) {
     }
     f = fopen(filename, "rb");
     if (f) {
-        size = fread(galbuffer, 1, GALBUFSIZE, f);
+        size = fread(galbuffer, 1, GALBUFSIZE - 1, f);
+        int failed = ferror(f);
+        int more = fgetc(f);
         fclose(f);
+        if (failed || more != EOF) {
+            fprintf(stderr, "Error: input file exceeds buffer or could not be read: %s\n", filename);
+            return -1;
+        }
         galbuffer[size] = 0;
     } else {
         printf("Error: failed to open file: %s\n", filename);
@@ -599,8 +631,9 @@ static char readFile(int* fileSize) {
 }
 
 static char checkForString(char* buf, int start, const char* key) {
-    int labelPos = strstr(buf + start, key) -  buf;
-    return (labelPos > 0 && labelPos < 500) ? 1 : 0;
+    if (start < 0 || start >= 500) return 0;
+    const char* match = strstr(buf + start, key);
+    return (match != NULL && match - buf < 500) ? 1 : 0;
 }
 
 static int openSerial(void) {
@@ -640,10 +673,16 @@ static int openSerial(void) {
 
         //read programmer's message
         total = waitForSerialPrompt(buf, 512, 1000);
+        if (total < 3 || total >= (int)sizeof(buf)) {
+            serialDeviceClose(serialF);
+            serialF = INVALID_HANDLE;
+            continue;
+        }
         buf[total] = 0;
 
-        //check we are communicating with Afterburner programmer
-        labelPos = strstr(buf, "AFTerburner v.") -  buf;
+        // Check the banner without subtracting a NULL pointer on a failed search.
+        const char* banner = strstr(buf, "AFTerburner v.");
+        labelPos = banner ? (int)(banner - buf) : -1;
 
         bigRam = 0;
         if (labelPos >= 0 && labelPos < 500 && buf[total - 3] == '>') {
@@ -977,6 +1016,10 @@ static char operationWriteOrVerify(char doWrite) {
     }
 
     result = parseFuseMap(galbuffer);
+    if (result < 0) {
+        fprintf(stderr, "Error: invalid JEDEC fusemap; refusing write/verify.\n");
+        return -1;
+    }
     if (verbose) {
         printf("parse result=%i\n", result);
     }
@@ -992,7 +1035,7 @@ static char operationWriteOrVerify(char doWrite) {
     }
     result = upload();
     if (result) {
-        return result;
+        goto finish;
     }
 
     // write command
@@ -1251,6 +1294,7 @@ static char operationReadFuses(void) {
     sprintf(buf, "r\r");
     readSize = sendLine(buf, GALBUFSIZE, 22000);
     if (readSize < 0)  {
+        closeSerial();
         return -1;
     }
     response = stripPrompt(buf);

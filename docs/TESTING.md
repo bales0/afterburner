@@ -37,4 +37,19 @@ The functional suite tests the real JEDEC parser and host protocol through an in
 
 ## Existing firmware observations
 
-The local firmware source still contains `if (0 == flagBits & FLAG_BIT_TYPE_CHECK)` and `xsvf->sirsize_bits <= 8` in XSIR2 handling, matching the defects discussed in the referenced chat. The desktop archive does not modify the firmware. In particular, host-side XSVF response handling cannot fix the XSIR2 firmware instruction bug. Check the firmware actually flashed on the programmer before testing affected XSVF files.
+The previous upstream defects (`if (0 == flagBits & FLAG_BIT_TYPE_CHECK)` and `xsvf->sirsize_bits <= 8`) have both been corrected in the firmware sources supplied in this ZIP. Installed programmers will still run their previously flashed firmware until explicitly updated. Hardware behavior remains unverified.
+
+## Offline repair verification (2026-10-31)
+
+- `gcc -O2 -std=gnu11 -DGCOM=\"test\" -o afterburner src_pc/afterburner.c src_pc/exerciser.c`: **PASS** (Linux-host CLI build).
+- `tests/cli_parser_regression.c`: **PASS**, 6 valid/invalid JEDEC cases.
+- `tests/sparse_regression.cpp`: **PASS**, compiled with `-fsanitize=address,undefined` and exercised sparse insertion, duplicate bits, compaction, and capacity overflow.
+- `python tests/test_direct_native.py` and `python tests/test_manifest.py`: **PASS**, source-level assertions and XML parsing.
+- **NOT RUN**: AVR/PlatformIO firmware compile, dotnet build, Avalonia headless tests, physical VPP/GAL/JTAG programming. Neither AVR toolchain nor dotnet SDK was available in the repair environment.
+- Original 52 PowerShell static checks in the earlier section are historical, not a claim that the modified tree was executed with PowerShell here.
+
+See `docs/FIXES_CZ.md` for hardware safety and upgrade notes.
+
+## 2026-10-31 – Uno compiler warning cleanup
+
+The supplied PlatformIO log showed SUCCESS (1777/2048 SRAM and 27294/32256 flash) **before** this cleanup. The subsequent source-only warning cleanup was tested with GCC for the legacy CLI, the JEDEC parser regression, the sparse fusemap regression and static checks. No AVR or .NET rebuild is claimed. See `WARNING_CLEANUP_CZ.md`.

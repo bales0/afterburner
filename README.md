@@ -24,7 +24,7 @@ dotnet build AfterburnerStudio.sln -c Release
 dotnet run --project AfterburnerStudio/AfterburnerStudio.csproj
 ```
 
-The application continues to use the firmware already installed in the programmer. This archive contains the complete desktop application, not a replacement Arduino firmware image.
+This repository also contains the Arduino firmware source (`src/afterburner.ino`) and the original C CLI (`src_pc/afterburner.c`). The Studio uses the installed firmware through the serial port; changing firmware sources requires a separate firmware build and flash. See `docs/FIXES_CZ.md` for the 2026-10-31 source fixes, compatibility notes and verification limits.
 
 ## Use
 
@@ -45,7 +45,7 @@ dotnet run --project tests/Functional/Functional.csproj -c Release
 
 The first command checks source structure, XML, handlers, language, style guards, pin mapping and bundled files. The second compiles the application/XAML and runs C# tests for JEDEC validation, pin numbering, emulated serial operations, UI enablement, confirmation cancellation and button pointer states. UI tests use Avalonia.Headless; they do not program a real device.
 
-**Current verification status:** 52 static source checks passed. .NET build and C# functional tests could not run in the delivery environment because starting `dotnet.exe` was denied; elevation attempts failed with Windows error 740. This package is therefore not claimed to be build-tested or hardware-tested. See `docs/TESTING.md` for the exact scope and remaining checks.
+**Verification:** C CLI build and offline parser/sparse-array tests passed in the repair environment. A current .NET SDK and AVR toolchain were unavailable there, so Studio and the modified firmware must still be built and tested locally. See `docs/FIXES_CZ.md` and `docs/TESTING.md` for details.
 
 ## Files
 

@@ -192,6 +192,8 @@ internal sealed class Emulator : ISerialTransport
         if(cmd=="*") Reply("AFTerburner v.0.6.2 varVpp\r\n>\r\n");
         else if(cmd.StartsWith('j')) Reply("\r\nRXSVF\r\n$003\r\n");
         else if(cmd==ErrorCommand) Reply("ER simulated failure\r\n>\r\n");
+        else if(cmd.StartsWith("#c ",StringComparison.Ordinal)) Reply("OK checksum matches\r\n>\r\n");
+        else if(cmd=="#e") Reply("OK upload finished\r\n>\r\n");
         else Reply("OK\r\n>\r\n");
     }
     public void Write(byte[] data,int offset,int count)
