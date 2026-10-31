@@ -7,11 +7,11 @@ r = Path(__file__).resolve().parents[1]
 firmware = (r / 'src/afterburner.ino').read_text()
 vpp = (r / 'aftb_vpp.h').read_text()
 mcp = (r / 'aftb_mcp4131.h').read_text()
-assert re.search(r'#define VERSION\s+"0\.6\.4"',firmware)
+assert re.search(r'#define VERSION\s+"0\.6\.3"',firmware)
 assert 'int16_t parse2hex(uint8_t i)' in firmware
 assert 'return -1;' in firmware
 assert 'int32_t parse4hex(uint8_t i)' in firmware
-assert 'val >= 0 && cs == (uint16_t)val' in firmware
+assert 'value >= 0 && cs == (uint16_t)value' in firmware
 assert 'uint8_t lineIndex' in firmware
 assert 'int8_t calOffset' in vpp and 'int8_t inc' in vpp
 assert 'int16_t minDif' in vpp and 'int16_t d1,d2' in vpp

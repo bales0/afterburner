@@ -45,6 +45,9 @@ To compile: gcc -g3 -O0 -o afterburner afterburner.c
 #include <string.h>
 #include <errno.h>
 #include <stdint.h>
+#ifdef _WIN32
+#include <io.h> // _isatty, _fileno for interactive safety confirmation
+#endif
 
 #include "serial_port.h"
 #include "exerciser.h"
@@ -63,6 +66,7 @@ To compile: gcc -g3 -O0 -o afterburner afterburner.c
 #define GALBUFSIZE (256 * 1024)
 
 #define JTAG_ID 0xFF
+#define RESULT_VPP_CANCELLED 2 // distinct from hardware and transport failures
 
 
 typedef enum {
@@ -147,6 +151,8 @@ char printSerialWhileWaiting = 0;
 int calOffset = 0; //no calibration offset is applied
 char enableSecurity = 0;
 char bigRam = 0;
+static char vppSocketConfirmed = 0; // one explicit confirmation per CLI invocation
+static char vppSafetyCancelled = 0;
 
 char opRead = 0;
 char opWrite = 0;
@@ -190,12 +196,14 @@ static void printHelp() {
     printf("   v : verify fuse map, -f and -t options must be set\n");
     printf("   e : erase the GAL chip,  -t option must be set. Optionally '-all' can be set.\n");
     printf("   p : write PES. -t and -pes options must be set. GAL must be erased with '-all' option.\n");
-    printf("   s : set VPP ON to check the programming voltage. Ensure the GAL is NOT inserted.\n");
-    printf("   b : calibrate variable VPP on new board designs. Ensure the GAL is NOT inserted.\n");
-    printf("   m : measure variable VPP on new board designs. Ensure the GAL is NOT inserted.\n");
+    printf("   s : set VPP ON to check the programming voltage.\n");
+    printf("   b : calibrate variable VPP on new board designs.\n");
+    printf("   m : measure variable VPP on new board designs.\n");
     printf("   x : exercise test script, -f must be set.\n");
         printf("options:\n");
     printf("  -v : verbose mode\n");
+    printf("  For s, b, m: Remove chip from socket or switch OFF power to socket\n");
+    printf("  For s, b, m: interactive confirmation with YES is required.\n");
     printf("  -t <gal_type> : the GAL type. use ");
     printGalTypes();
     printf("\n");
@@ -208,6 +216,8 @@ static void printHelp() {
     printf("  -all: use with 'e' command to erase all data including PES.\n");
     printf("  -pes <PES> : use with 'p' command to specify new PES. PES format is 8 hex bytes with a delimiter.\n");
     printf("               For example 00:03:3A:A1:00:00:00:90\n");
+    printf("  Operation letters may be grouped or separated: im -v, i m -v, and -v m i are equivalent.\n");
+    printf("  Use -d COM5 to select the serial port (COM1 is a default, not automatic detection).\n");
     printf("examples:\n");
     printf("  afterburner i -t ATF16V8B : reads and prints the device info\n");
     printf("  afterburner r -t ATF16V8B : reads the fuse map from the GAL chip and displays it\n");
@@ -273,87 +283,93 @@ static int8_t verifyArgs(char* type) {
 static int8_t checkArgs(int argc, char** argv) {
     int i;
     char* type = 0;
-    char* modes = 0;
-
     gal = UNKNOWN;
 
+    // Parse each operation group independently: "im", "i m", and "i -v m"
+    // are equivalent. Option values (-t/-f/-d/-pes/-co) are consumed first,
+    // and therefore never interpreted as operation letters.
     for (i = 1; i < argc; i++) {
-        char* param = argv[i];
-        if (strcmp("-t", param) == 0) {
-            i++;
-            type = argv[i];
+        const char* param = argv[i];
+        if (strcmp("-t", param) == 0 || strcmp("-f", param) == 0 ||
+            strcmp("-d", param) == 0 || strcmp("-pes", param) == 0 ||
+            strcmp("-co", param) == 0) {
+            const char* option = param;
+            if (i + 1 >= argc || argv[i + 1][0] == 0 ||
+                (argv[i + 1][0] == '-' && strcmp(option, "-co") != 0)) {
+                fprintf(stderr, "Error: missing value for option %s.\n", option);
+                return -1;
+            }
+            param = argv[++i];
+            if (strcmp(option, "-t") == 0) {
+                if (type != NULL && strcmp(type, param) != 0) {
+                    fprintf(stderr, "Error: conflicting -t values.\n");
+                    return -1;
+                }
+                type = (char*)param;
+            } else if (strcmp(option, "-f") == 0) {
+                if (filename != NULL && strcmp(filename, param) != 0) {
+                    fprintf(stderr, "Error: conflicting -f values.\n");
+                    return -1;
+                }
+                filename = (char*)param;
+            } else if (strcmp(option, "-d") == 0) {
+                if (deviceName != NULL && strcmp(deviceName, param) != 0) {
+                    fprintf(stderr, "Error: conflicting -d values.\n");
+                    return -1;
+                }
+                deviceName = (char*)param;
+            } else if (strcmp(option, "-pes") == 0) {
+                if (pesString != NULL && strcmp(pesString, param) != 0) {
+                    fprintf(stderr, "Error: conflicting -pes values.\n");
+                    return -1;
+                }
+                pesString = (char*)param;
+            } else {
+                char* endptr = NULL;
+                long value;
+                errno = 0;
+                value = strtol(param, &endptr, 10);
+                if (errno != 0 || endptr == param || *endptr != 0 || value < -32 || value > 32) {
+                    fprintf(stderr, "Error: invalid -co offset (expected -32..32).\n");
+                    return -1;
+                }
+                calOffset = (int)value;
+            }
         } else if (strcmp("-v", param) == 0) {
             verbose = 1;
-        } else if (strcmp("-f", param) == 0) {
-            i++;
-            filename = argv[i];
-        } else if (strcmp("-d", param) == 0) {
-            i++;
-            deviceName = argv[i];
         } else if (strcmp("-nc", param) == 0) {
             noGalCheck = 1;
         } else if (strcmp("-sec", param) == 0) {
             opSecureGal = 1;
         } else if (strcmp("-all", param) == 0) {
             flagEraseAll = 1;
-        }  else if (strcmp("-pes", param) == 0) {
-            i++;
-            pesString = argv[i];
-        } else if (strcmp("-co", param) == 0) {
-            i++;
-            calOffset = atoi(argv[i]);
-            if (calOffset < -32 || calOffset > 32) {
-                printf("Calibration offset out of range (-32..32 inclusive).\n");
+        } else if (param[0] == '-') {
+            fprintf(stderr, "Error: unknown option '%s'.\n", param);
+            return -1;
+        } else {
+            const char* mode = param;
+            if (!*mode) {
+                fprintf(stderr, "Error: empty operation argument.\n");
+                return -1;
             }
-            if (calOffset < -32) {
-                calOffset = -32;
-            } else if (calOffset > 32) {
-                calOffset = 32;
+            for (; *mode; mode++) {
+                switch (*mode) {
+                case 'r': opRead = 1; break;
+                case 'w': opWrite = 1; break;
+                case 'v': opVerify = 1; break;
+                case 'e': opErase = 1; break;
+                case 'i': opInfo = 1; break;
+                case 's': opTestVPP = 1; break;
+                case 'b': opCalibrateVPP = 1; break;
+                case 'm': opMeasureVPP = 1; break;
+                case 'p': opWritePes = 1; break;
+                case 'x': opExercise = 1; noGalCheck = 1; break;
+                default:
+                    fprintf(stderr, "Error: unknown operation '%c' in '%s'.\n", *mode, param);
+                    return -1;
+                }
             }
         }
-        else if (param[0] != '-') {
-            modes = param;
-        }
-    }
-
-    i = 0;
-    while (modes != 0 && modes[i] != 0) {
-        switch (modes[i]) {
-        case 'r':
-            opRead = 1;
-            break;
-        case 'w':
-            opWrite = 1;
-            break;
-        case 'v':
-            opVerify = 1;
-            break;
-        case 'e':
-            opErase = 1;
-            break;
-        case 'i':
-            opInfo = 1;
-            break;
-        case 's':
-            opTestVPP = 1;
-            break;
-        case 'b':
-            opCalibrateVPP = 1;
-            break;
-        case 'm':
-            opMeasureVPP = 1;
-            break;
-        case 'p':
-            opWritePes = 1;
-            break;
-        case 'x':
-            opExercise = 1;
-            noGalCheck = 1;
-            break;
-        default:
-            printf("Error: unknown operation '%c' \n", modes[i]);
-        }
-        i++;
     }
 
     if (verifyArgs(type)) {
@@ -657,9 +673,16 @@ static int openSerial(void) {
 
     while (retry) {
         retry--;
+        fflush(stdout); // Keep connection attempts before errors in redirected logs.
         serialF = serialDeviceOpen(devName);
         if (serialF == INVALID_HANDLE) {
-            printf("Error: failed to open serial device: %s\n", devName);
+            fprintf(stderr, "Error: unable to open serial port %s; connection to the Afterburner programmer was not established.\n", devName);
+#ifdef _USE_WIN_API_
+            fprintf(stderr, "Check the port in Windows Device Manager and select it using -d COM5 (example).\n");
+#else
+            fprintf(stderr, "Check the serial device path and select it with -d /dev/ttyUSB0 (example).\n");
+#endif
+            fprintf(stderr, "Also check the USB connection and close other programs using the port.\n");
             return -2;
         }
 #ifndef _USE_WIN_API_
@@ -703,6 +726,21 @@ static int openSerial(void) {
             bigRam = checkForString(buf, labelPos, " RAM-BIG");
             if (verbose && bigRam) {
                 printf("MCU Big RAM detected\n");
+            }
+            // Optional serial SRAM status is diagnostic only (no fusemap storage).
+            // Older firmware banners omit the field; do not call that absence a failure.
+            if (verbose) {
+                if (checkForString(buf, labelPos, "SeRAM:23LC512")) {
+                    printf("External serial SRAM: 23LC512 detected\n");
+                } else if (checkForString(buf, labelPos, "SeRAM:23LC1024")) {
+                    printf("External serial SRAM: 23LC1024 detected\n");
+                } else if (checkForString(buf, labelPos, "SeRAM:None")) {
+                    printf("External serial SRAM: not detected\n");
+                } else if (checkForString(buf, labelPos, "SeRAM:NotChecked")) {
+                    printf("External serial SRAM: detection unavailable on this board\n");
+                } else {
+                    printf("External serial SRAM: not reported by firmware\n");
+                }
             }
             //all OK
             return 0;
@@ -813,6 +851,7 @@ static int readSerialAvailable(char* buf, int length) {
 
 static int waitForSerialPrompt(char* buf, int bufSize, int maxDelay) {
     int pos = 0;
+    int streamed = 0;
     if (buf == NULL || bufSize < 4) return -1;
     memset(buf, 0, bufSize);
     while (maxDelay > 0) {
@@ -824,14 +863,22 @@ static int waitForSerialPrompt(char* buf, int bufSize, int maxDelay) {
         int n = readSerialAvailable(buf + pos, available);
         if (n < 0 || n > available) return -1;
         if (n > 0) {
-            if (printSerialWhileWaiting) {
-                // Display received data but never treat a partial prompt as success.
-                fwrite(buf + pos, 1, n, stdout);
-                fflush(stdout);
-            }
+            int promptAt;
             pos += n;
             buf[pos] = 0;
-            if (checkPromptExists(buf, pos) >= 0) return pos;
+            promptAt = checkPromptExists(buf, pos);
+            if (printSerialWhileWaiting) {
+                // The response is streamed to the user once. Keep the last 3
+                // bytes until the next read so a fragmented ">\r\n" prompt is
+                // never printed as measurement data.
+                int end = (promptAt >= 0) ? promptAt : (pos > 3 ? pos - 3 : 0);
+                if (end > streamed) {
+                    fwrite(buf + streamed, 1, (size_t)(end - streamed), stdout);
+                    streamed = end;
+                    fflush(stdout);
+                }
+            }
+            if (promptAt >= 0) return pos;
         }
 #ifndef _USE_WIN_API_
         usleep(10 * 1000);
@@ -890,7 +937,8 @@ static int sendLine(char* buf, int bufSize, int maxDelay) {
     if (total >= bufSize) return -1;
     obuf[total] = 0;
     obuf = stripPrompt(obuf);
-    if (verbose) {
+    // Do not reprint measurement/calibration data already shown live.
+    if (verbose && !printSerialWhileWaiting) {
         printf("read: %i '%s'\n", total, obuf);
     }
 
@@ -906,6 +954,28 @@ static void updateProgressBar(char* label, int current, int total) {
         printf("%.*s%*s|\r", done, "########################################", 40 - done, "");
         fflush(stdout); //flush the text out so that the animation of the progress bar looks smooth
     }
+}
+
+// Upload rows must be checked immediately: a rejected #f row can report
+// the true capacity error before a later checksum returns only a generic failure.
+static int sendUploadLineChecked(char* buf, int maxDelay) {
+    const char* line;
+    if (sendLine(buf, MAX_LINE, maxDelay) < 0) return -1;
+    line = stripPrompt(buf);
+    while (*line) {
+        const char* end;
+        while (*line == '\r' || *line == '\n') line++;
+        if (!*line) break;
+        end = line;
+        while (*end && *end != '\r' && *end != '\n') end++;
+        if ((end - line >= 2 && line[0] == 'E' && line[1] == 'R') ||
+            (end - line >= 6 && strncmp(line, "Error:", 6) == 0)) {
+            fprintf(stderr, "Firmware rejected upload: %.*s\n", (int)(end - line), line);
+            return -1;
+        }
+        line = end;
+    }
+    return 0;
 }
 
 // Upload fusemap in byte format (as opposed to bit format used in JEDEC file).
@@ -924,11 +994,11 @@ static char upload() {
 
     // Start  upload
     sprintf(buf, "u\r");
-    if (sendLine(buf, MAX_LINE, 2000) < 0) return -1;
+    if (sendUploadLineChecked(buf, 2000) < 0) return -1;
 
     //device type
     sprintf(buf, "#t %c %s\r", '0' + (int) gal, galinfo[gal].name);
-    if (sendLine(buf, MAX_LINE, 300) < 0) return -1;
+    if (sendUploadLineChecked(buf, 300) < 0) return -1;
 
     //fuse map
     buf[0] = 0;
@@ -945,7 +1015,7 @@ static char upload() {
 #ifdef DEBUG_UPLOAD
                     printf("%s\n", buf);
 #endif
-                    if (sendLine(buf, MAX_LINE, 100) < 0) return -1;
+                    if (sendUploadLineChecked(buf, 100) < 0) return -1;
                     buf[0] = 0;
                 }
                 fuseSet = 0;
@@ -973,7 +1043,7 @@ static char upload() {
 #ifdef DEBUG_UPLOAD
         printf("%s\n", buf);
 #endif
-        if (sendLine(buf, MAX_LINE, 100) < 0) return -1;
+        if (sendUploadLineChecked(buf, 100) < 0) return -1;
     }
 
     //checksum
@@ -982,7 +1052,7 @@ static char upload() {
         printf("sending csum: %04X\n", csum);
     }
     sprintf(buf, "#c %04X\r", csum);
-    if (sendLine(buf, MAX_LINE, 300) < 0) return -1;
+    if (sendUploadLineChecked(buf, 300) < 0) return -1;
     if (strstr(buf, "OK checksum matches") == NULL) return -1;
 
     //end of upload
@@ -1046,7 +1116,7 @@ static char operationWriteOrVerify(char doWrite) {
         return -1;
     }
     if (verbose) {
-        printf("parse result=%i\n", result);
+        printf("JEDEC fusemap parsed successfully.\n");
     }
 
     if (openSerial() != 0) {
@@ -1098,6 +1168,42 @@ static char operationReadInfo(void) {
     return result;
 }
 
+// VPP test/calibration can drive programming voltages into the ZIF socket.
+// Confirm the chip is removed OR VPP is physically isolated from the socket.
+// This is a user safety confirmation, NOT an electrical chip-presence test.
+// Refuse to proceed from redirected stdin (no interactive confirmation).
+static int confirmEmptySocketForVpp(void) {
+    char answer[32];
+    size_t length;
+    int interactive;
+
+    if (vppSocketConfirmed) return 1;
+#ifdef _WIN32
+    interactive = _isatty(_fileno(stdin));
+#else
+    interactive = isatty(fileno(stdin));
+#endif
+    printf("\nSAFETY CHECK - VPP voltage test/calibration\n");
+    printf("Remove chip from socket or switch OFF power to socket\n");
+    if (!interactive) {
+        fprintf(stderr, "Error: VPP operation requires interactive confirmation in a terminal.\n");
+        return 0;
+    }
+
+    printf("Confirm you have done either: type YES and press Enter (anything else cancels): ");
+    fflush(stdout);
+    if (!fgets(answer, sizeof(answer), stdin)) return 0;
+    length = strlen(answer);
+    // Reject truncated input; never accept a partial or ambiguous confirmation.
+    if (length == 0 || (answer[length - 1] != '\n' && !feof(stdin))) return 0;
+    while (length > 0 && (answer[length - 1] == '\n' || answer[length - 1] == '\r')) {
+        answer[--length] = 0;
+    }
+    if (strcmp(answer, "YES") != 0) return 0;
+    vppSocketConfirmed = 1;
+    return 1;
+}
+
 // Test of programming voltage. Most chips require +12V to start prograaming.
 // This test function turns ON the ENable pin so the Programming voltage is set.
 // After 20 seconds the ENable pin is turned OFF. This gives you time to turn the
@@ -1105,6 +1211,11 @@ static char operationReadInfo(void) {
 static char operationTestVpp(void) {
 
     char result;
+
+    if (!confirmEmptySocketForVpp()) {
+        vppSafetyCancelled = 1;
+        return RESULT_VPP_CANCELLED;
+    }
 
     if (openSerial() != 0) {
         return -1;
@@ -1133,6 +1244,11 @@ static char operationCalibrateVpp(void) {
     char result;
     char cmd [8] = {0};
     char val = (char)('0' + (calOffset + 32));
+
+    if (!confirmEmptySocketForVpp()) {
+        vppSafetyCancelled = 1;
+        return RESULT_VPP_CANCELLED;
+    }
 
     if (openSerial() != 0) {
         return -1;
@@ -1165,6 +1281,11 @@ static char operationCalibrateVpp(void) {
 
 static char operationMeasureVpp(void) {
     char result;
+
+    if (!confirmEmptySocketForVpp()) {
+        vppSafetyCancelled = 1;
+        return RESULT_VPP_CANCELLED;
+    }
 
     if (openSerial() != 0) {
         return -1;
@@ -1252,19 +1373,31 @@ static char operationWritePes(void) {
 
     //Switch to upload mode to specify GAL
     sprintf(buf, "u\r");
-    sendLine(buf, MAX_LINE, 300);
+    if (sendLine(buf, MAX_LINE, 300) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     //set GAL type
     sprintf(buf, "#t %c\r", '0' + (int) gal);
-    sendLine(buf, MAX_LINE, 300);
+    if (sendLine(buf, MAX_LINE, 300) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     //set new PES
     sprintf(buf, "#p %s\r", pesString);
-    sendLine(buf, MAX_LINE, 300);
+    if (sendLine(buf, MAX_LINE, 300) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     //Exit upload mode (ensure the return texts are discarded by waiting 100 ms)
     sprintf(buf, "#e\r");
-    sendLine(buf, MAX_LINE, 100);
+    if (sendLine(buf, MAX_LINE, 100) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     if (verbose) {
         printf("sending 'P' command...\n");
@@ -1286,15 +1419,24 @@ static char operationEraseGal(void) {
 
     //Switch to upload mode to specify GAL
     sprintf(buf, "u\r");
-    sendLine(buf, MAX_LINE, 300);
+    if (sendLine(buf, MAX_LINE, 300) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     //set GAL type
     sprintf(buf, "#t %c\r", '0' + (int) gal);
-    sendLine(buf, MAX_LINE, 300);
+    if (sendLine(buf, MAX_LINE, 300) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     //Exit upload mode (ensure the return texts are discarded by waiting 100 ms)
     sprintf(buf, "#e\r");
-    sendLine(buf, MAX_LINE, 100);
+    if (sendLine(buf, MAX_LINE, 100) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     if (flagEraseAll) {
         result = sendGenericCommand("~\r", "erase all failed ?", 4000, 0);
@@ -1317,15 +1459,24 @@ static char operationReadFuses(void) {
 
     //Switch to upload mode to specify GAL
     sprintf(buf, "u\r");
-    sendLine(buf, MAX_LINE, 100);
+    if (sendLine(buf, MAX_LINE, 100) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     //set GAL type
     sprintf(buf, "#t %c\r", '0' + (int) gal);
-    sendLine(buf, MAX_LINE, 100);
+    if (sendLine(buf, MAX_LINE, 100) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     //Exit upload mode (ensure the texts are discarded by waiting 100 ms)
     sprintf(buf, "#e\r");
-    sendLine(buf, MAX_LINE, 1000);
+    if (sendLine(buf, MAX_LINE, 1000) < 0) {
+        closeSerial();
+        return -1;
+    }
 
     //READ_FUSE command
     sprintf(buf, "r\r");
@@ -1653,6 +1804,7 @@ static int processExerciser(void) {
      //do syntax check
     result = exerciseCheckFile(galbuffer, fSize);
     if (result) {
+        closeSerial();
         return result;
     }
 
@@ -1662,6 +1814,7 @@ static int processExerciser(void) {
     }
     result = sendGenericCommand("X1\r", "excersize failed ?", 4000, 0);
     if (result) {
+        closeSerial();
         return result;
     }
 
@@ -1676,6 +1829,9 @@ static int processExerciser(void) {
 
         result = sendGenericCommand(tmp, "excersize pulse duration failed ?", 4000, 0);
         if (result) {
+            // Best effort: reset exerciser mode on an error.
+            sendGenericCommand("X0\r", "exerciser cleanup failed", 4000, 0);
+            closeSerial();
             return result;
         }
     }
@@ -1683,7 +1839,10 @@ static int processExerciser(void) {
     result = exerciseRunFile(galbuffer, fSize);
 
     // turn off excersize mode
-    result = sendGenericCommand("X0\r", "excersize failed ?", 4000, 0);
+    {
+        int cleanupResult = sendGenericCommand("X0\r", "excersize failed ?", 4000, 0);
+        if (result == 0) result = cleanupResult;
+    }
 
     closeSerial();
 
@@ -1697,11 +1856,12 @@ int main(int argc, char** argv) {
 
     result = checkArgs(argc, argv);
     if (result) {
+        if (verbose) fprintf(stderr, "Operation failed: invalid command-line arguments.\n");
         return result;
     }
     if (verbose) {
         printf("Afterburner CLI " VERSION "\n");
-        printf("gal=%d\n", gal);
+        if (gal != UNKNOWN) printf("Selected device: %s\n", galinfo[gal].name);
     }
 
     // process JTAG operations
@@ -1725,12 +1885,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (opErase && (0 == result || noGalCheck)) {
+    // -nc disables only the GAL identity check; it must not bypass a failed
+    // serial connection, type selection, or another initialization command.
+    if (opErase && result == 0) {
         operationAttempted = 1;
         result = operationEraseGal();
     }
 
-    if (0 == result || noGalCheck) {
+    if (result == 0) {
         if (opWrite) {
             // writing fuses and optionally verification
             operationAttempted = 1;
@@ -1757,7 +1919,8 @@ int main(int argc, char** argv) {
         }
         if (0 == result && (opWrite || opVerify)) {
             if (opSecureGal) {
-                operationSecureGal();
+                operationAttempted = 1;
+                result = operationSecureGal();
             }
         }
         // These functions open the serial port and detect varVpp themselves.
@@ -1779,8 +1942,15 @@ finish:
         fprintf(stderr, "Error: no requested operation was executed.\n");
         result = -1;
     }
-    if (verbose) {
-        printf("result=%i\n", (char)result);
+    if (vppSafetyCancelled) {
+        fprintf(stderr, "Operation cancelled: VPP test/calibration was not started.\n");
+    } else if (verbose) {
+        if (result == 0) {
+            printf("Operation completed successfully.\n");
+        } else {
+            fprintf(stderr, "Operation failed. See error messages above.\n");
+        }
     }
+    // Preserve numeric process status for scripts, never print it to users.
     return result;
 }

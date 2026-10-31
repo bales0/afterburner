@@ -33,11 +33,8 @@ Reading or Writing of 1 byte takes ~ 620 uSec for 24bit addressing and ~ 500 uSe
 #define OPCODE_RDMR 5
 #define OPCODE_WRMR 1
 
-#ifndef RAM_BIG
-
-#define seRamInit() 0
-
-#else /* RAM_BIG */
+// A presence probe is safe on variable-VPP boards even on Uno.
+// External SeRAM is *not* used to store fusemaps; RAM_BIG describes MCU SRAM only.
 
 uint8_t ramAddrBits24 = 0;
 
@@ -150,11 +147,13 @@ static void seRamSetupMode(void) {
 static uint8_t seRamInit(void) {
   uint8_t r;
 
-#if 0
+  // The bus is shared with the shift register and VPP DAC.
+  // The caller ensures the shift register is deselected and VPP is idle.
   pinMode(SHR_CS, OUTPUT);
+  digitalWrite(SHR_CS, 1);
   pinMode(RAM_CLK, OUTPUT);
+  digitalWrite(RAM_CLK, 0);
   pinMode(RAM_DAT, OUTPUT);
-#endif
 
   seRamSetupMode();
   //try 16bit addressing mode (64kb RAM)
@@ -189,7 +188,5 @@ static uint8_t seRamInit(void) {
   r = seRamRead(0);
   return (r == 0x5A) ? (ramAddrBits24 + 1) : 0;
 }
-
-#endif /* RAM_BIG */
 
 #endif /*_AFTB_SERAM_*/

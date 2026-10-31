@@ -20,7 +20,7 @@ function = source[start:end]
 assert '#if 0' not in function
 assert 'varVppMeasureVpp(0)' in function
 assert 'varVppSet(VPP_5V0)' in function
-assert '#define VERSION "0.6.4"' in (root / 'src/afterburner.ino').read_text()
+assert '#define VERSION "0.6.3"' in (root / 'src/afterburner.ino').read_text()
 
 program = r'''
 #include <cstdint>

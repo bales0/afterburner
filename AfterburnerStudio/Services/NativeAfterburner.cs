@@ -1,11 +1,20 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using AfterburnerStudio.Models;
 
 namespace AfterburnerStudio.Services;
 
-public sealed record NativeResult(bool Succeeded, string Output, string? Error = null);
+public sealed record VoltageReading(string Target, double Measured);
+public sealed record NativeResult(bool Succeeded, string Output, string? Error = null,
+    IReadOnlyList<VoltageReading>? VoltageReadings = null,
+    IReadOnlyList<string>? Details = null, string? ConnectionSummary = null);
+
+// Structured UI events: the diagnostic log is NOT the source of UI state.
+public enum ProgrammerProgressKind { Stage, Progress, Voltage, VoltageStep, Message, Error, Connection, Detail }
+public sealed record ProgrammerProgress(ProgrammerProgressKind Kind, string Message,
+    int Current = 0, int Total = 0, string? VoltageTarget = null, double? Voltage = null);
 
 /// <summary>
 /// Native host implementation of the original afterburner.ino text/serial wire protocol.
@@ -18,6 +27,19 @@ public sealed class NativeAfterburner
 {
     private readonly StringBuilder _output = new();
     private IProgress<string>? _log;
+    private IProgress<ProgrammerProgress>? _uiProgress;
+    private string _activeAction = "";
+    private int _vppPointCount;
+    private int _lastAnnouncedVppStep;
+    private readonly List<VoltageReading> _voltageReadings = new();
+    private readonly List<string> _details = new();
+    private string? _connectionSummary;
+    private static readonly Regex VppPointPattern = new(
+        @"^VPP:\s*(.+?)\s*:\s*(-?\d+(?:\.\d+)?)\s*(?:V)?$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex VppStepPrefixPattern = new(
+        @"^VPP:\s*(.+?)\s*:\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private CancellationToken _token;
     private Stopwatch _clock = new();
     private TimeSpan _limit;
@@ -26,34 +48,48 @@ public sealed class NativeAfterburner
     public NativeAfterburner(Func<string, ISerialTransport>? transportFactory = null) =>
         _transportFactory = transportFactory ?? (name => new SerialTransport(name));
     private bool _varVpp;
+    // Set after a successful programmer handshake; purely informational.
+    public string ExternalRamStatus { get; private set; } = "Not queried";
     private bool _calibrationMissing;
     private bool _calibrationVerified;
     private const int ResponseMax = 320_000;
 
     public Task<NativeResult> RunAsync(string port, ChipProfile chip, string action, byte[]? fuseBits,
-        byte[]? xsvf, byte[]? eraseXsvf, int offset, IProgress<string> log, TimeSpan timeout, CancellationToken token)
+        byte[]? xsvf, byte[]? eraseXsvf, int offset, IProgress<string> log, TimeSpan timeout, CancellationToken token,
+        IProgress<ProgrammerProgress>? uiProgress = null)
     {
         // All state belongs to one operation; the UI serializes calls.
-        return Task.Run(() => RunSync(port, chip, action, fuseBits, xsvf, eraseXsvf, offset, log, timeout, token), token);
+        return Task.Run(() => RunSync(port, chip, action, fuseBits, xsvf, eraseXsvf, offset, log, timeout, token, uiProgress), token);
     }
 
     private NativeResult RunSync(string port, ChipProfile chip, string action, byte[]? fuseBits,
-        byte[]? xsvf, byte[]? eraseXsvf, int offset, IProgress<string> log, TimeSpan timeout, CancellationToken token)
+        byte[]? xsvf, byte[]? eraseXsvf, int offset, IProgress<string> log, TimeSpan timeout, CancellationToken token,
+        IProgress<ProgrammerProgress>? uiProgress)
     {
         _token = token;
         _log = log;
+        _uiProgress = uiProgress;
+        _activeAction = action;
+        _vppPointCount = 0;
+        _lastAnnouncedVppStep = 0;
+        _voltageReadings.Clear();
+        _details.Clear();
+        _connectionSummary = null;
         _limit = timeout;
         _clock = Stopwatch.StartNew();
         _output.Clear();
         _varVpp = false;
+        ExternalRamStatus = "Not queried";
         _calibrationMissing = false;
         _calibrationVerified = false;
         try
         {
             if (string.IsNullOrWhiteSpace(port)) throw new InvalidOperationException("No serial port selected.");
+            Emit(ProgrammerProgressKind.Stage, "Connecting to programmer on " + port + "…");
             _port = _transportFactory(port);
             _port.Open();
             Connect();
+            Emit(ProgrammerProgressKind.Stage, "Connected to programmer on " + port + ".");
             if (_varVpp && !_calibrationVerified && action is not ("s" or "b" or "m"))
                 throw new InvalidOperationException(_calibrationMissing
                     ? "Variable VPP failed its startup voltage measurement. Verify the hardware and recalibrate with an empty socket."
@@ -68,6 +104,15 @@ public sealed class NativeAfterburner
             }
             else
             {
+                Emit(ProgrammerProgressKind.Stage, action switch {
+                    "i" => "Reading device identification…",
+                    "r" => "Reading fusemap…",
+                    "e" => "Erasing device…",
+                    "w" => "Programming device…",
+                    "v" => "Verifying device…",
+                    "wv" => "Preparing device programming and verification…",
+                    _ => "Communicating with programmer…"
+                });
                 // Enable PES/type protection before selecting a new GAL.
                 Command("f", show: false);
                 int id = ChipProfile.All.ToList().FindIndex(c => c.Name == chip.Name) + 1;
@@ -76,21 +121,36 @@ public sealed class NativeAfterburner
                 if (action is "r" or "e") SetUploadType(chip);
                 switch (action)
                 {
-                    case "i": Command("p"); break;
-                    case "r": Command("r", show: true, largeResponse: true); break;
-                    case "e": Command("c"); break; // Normal erase. Never erase PES.
+                    case "i":
+                        AddDeviceInfo(Command("p"), chip);
+                        break;
+                    case "r":
+                        Command("r", show: true, largeResponse: true);
+                        AddDetail("Fusemap received from the programmer; validating and saving the JEDEC file.");
+                        break;
+                    case "e":
+                        AddCommandInfo("Erase", Command("c")); // Normal erase. Never erase PES.
+                        break;
                     case "w":
                     case "v":
                     case "wv":
                         if (fuseBits is null) throw new InvalidOperationException("No validated JEDEC fusemap supplied.");
                         UploadFuseMap(chip, fuseBits);
-                        if (action.Contains('w')) Command("w");
-                        if (action.Contains('v')) Command("v");
+                        if (action.Contains('w')) {
+                            Emit(ProgrammerProgressKind.Stage, "Programming device…");
+                            AddCommandInfo("Programming", Command("w"));
+                        }
+                        if (action.Contains('v')) {
+                            Emit(ProgrammerProgressKind.Stage, "Verifying programmed data…");
+                            AddCommandInfo("Verification", Command("v"));
+                        }
                         break;
                     default: throw new NotSupportedException("Unsupported operation: " + action);
                 }
             }
-            return new NativeResult(true, _output.ToString());
+            Emit(ProgrammerProgressKind.Stage, "Programmer operation completed.");
+            return new NativeResult(true, _output.ToString(), VoltageReadings: _voltageReadings.ToArray(),
+                Details: _details.ToArray(), ConnectionSummary: _connectionSummary);
         }
         catch (OperationCanceledException)
         {
@@ -98,8 +158,10 @@ public sealed class NativeAfterburner
         }
         catch (Exception ex)
         {
+            Emit(ProgrammerProgressKind.Error, ex.Message);
             _log?.Report("ERROR: " + ex.Message);
-            return new NativeResult(false, _output.ToString(), ex.Message);
+            return new NativeResult(false, _output.ToString(), ex.Message, _voltageReadings.ToArray(),
+                _details.ToArray(), _connectionSummary);
         }
         finally
         {
@@ -109,6 +171,134 @@ public sealed class NativeAfterburner
             _port?.Dispose();
             _port = null;
         }
+    }
+
+    private void Emit(ProgrammerProgressKind kind, string message,
+        int current = 0, int total = 0, string? voltageTarget = null, double? voltage = null) =>
+        _uiProgress?.Report(new ProgrammerProgress(kind, message, current, total, voltageTarget, voltage));
+
+    // Structured, bounded results for the active GUI page. The diagnostic log
+    // is never parsed by MainWindow to decide whether an operation succeeded.
+    private void AddDetail(string message)
+    {
+        message = message.Trim();
+        if (message.Length == 0) return;
+        if (message.Length > 240) message = message[..240] + "…";
+        if (_details.Count >= 10) _details.RemoveAt(0);
+        _details.Add(message);
+        Emit(ProgrammerProgressKind.Detail, message);
+    }
+
+    // A serial prompt means only that the firmware finished the command.
+    // It does NOT mean that a chip was found. Unknown/empty PES is a failure.
+    private static readonly Regex PesTypePattern = new(
+        @"\b(GAL16V8|GAL18V10|GAL20V8|GAL20RA10|GAL20XV10|GAL22V10|GAL26CV12|GAL26V12|GAL6001|GAL6002|ATF16V8B|ATF16V8C|ATF20V8B|ATF22V10B|ATF22V10C|ATF750C|ATF750LVC)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    internal static string? ValidatePesIdentification(string reply, string selectedType)
+    {
+        var pes = reply.Replace("\r", "").Split('\n')
+            .Select(line => line.Trim())
+            .FirstOrDefault(line => line.StartsWith("PES info:", StringComparison.OrdinalIgnoreCase));
+        if (pes is null || pes.Contains("Unknown GAL", StringComparison.OrdinalIgnoreCase) ||
+            !pes.Contains("VPP=", StringComparison.OrdinalIgnoreCase))
+            return "Chip not detected or PES identification invalid. Check chip insertion, socket power and contacts.";
+        var detected = PesTypePattern.Match(pes);
+        if (!detected.Success)
+            return "Chip not detected: firmware did not identify a supported GAL/ATF device.";
+        string model = detected.Value.ToUpperInvariant();
+        bool matches = model == selectedType.ToUpperInvariant() ||
+            (selectedType == "ATF16V8B" && model == "ATF16V8C") ||
+            (selectedType == "ATF750C" && model == "ATF750LVC");
+        return matches ? null : $"Detected {model}, but {selectedType} is selected. Check the selected chip type.";
+    }
+
+    private void AddDeviceInfo(string reply, ChipProfile chip)
+    {
+        string? error = ValidatePesIdentification(reply, chip.Name);
+        if (error is not null)
+        {
+            AddDetail(error);
+            throw new InvalidOperationException(error);
+        }
+        foreach (var line in reply.Replace("\r", "").Split('\n'))
+        {
+            string value = line.Trim();
+            if (value.StartsWith("PES info:", StringComparison.OrdinalIgnoreCase))
+                AddDetail("Device detected — " + value);
+        }
+    }
+
+    private void AddCommandInfo(string action, string reply)
+    {
+        bool reported = false;
+        foreach (var line in reply.Replace("\r", "").Split('\n'))
+        {
+            string value = line.Trim();
+            if (value.Length == 0 || value == ">" || value.Equals("OK", StringComparison.OrdinalIgnoreCase))
+                continue;
+            // Do not show raw serial data, but retain firmware feedback for users.
+            if (value.StartsWith("OK ", StringComparison.OrdinalIgnoreCase) ||
+                value.StartsWith("VPP", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("verify", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("error", StringComparison.OrdinalIgnoreCase))
+            {
+                AddDetail(action + ": " + value);
+                reported = true;
+            }
+        }
+        if (!reported)
+            AddDetail(action + ": firmware command finished without a reported error.");
+    }
+
+    private void HandleFirmwareLine(string line)
+    {
+        if (_activeAction is not ("m" or "b" or "s")) return;
+        var point = VppPointPattern.Match(line);
+        if (point.Success && double.TryParse(point.Groups[2].Value, NumberStyles.Float,
+                CultureInfo.InvariantCulture, out double measured))
+        {
+            _vppPointCount++;
+            _voltageReadings.Add(new VoltageReading(point.Groups[1].Value.Trim(), measured));
+            Emit(ProgrammerProgressKind.Voltage, line, _vppPointCount,
+                _activeAction == "m" ? 6 : 0, point.Groups[1].Value.Trim(), measured);
+            // Do not announce the next measurement here. The firmware delays
+            // between points, so announcing the next step immediately is misleading.
+            // ReadPrompt announces each step from its live, unfinished VPP header.
+        }
+        else if (line.StartsWith("VPP calib.", StringComparison.OrdinalIgnoreCase) ||
+                 line.Contains("Calibration", StringComparison.OrdinalIgnoreCase) ||
+                 line.StartsWith("*Index", StringComparison.OrdinalIgnoreCase))
+            Emit(ProgrammerProgressKind.Message, line);
+    }
+
+    // The firmware sends "VPP: <target> : " before it sends the measured
+    // voltage and line ending. Detect that prefix to show the active step
+    // immediately, rather than waiting for the entire response or guessing
+    // that the next step started during the firmware's inter-step delay.
+    internal static int VppStepNumber(string target) =>
+        target.Replace(" ", "", StringComparison.Ordinal).ToUpperInvariant() switch
+        {
+            "4.2-5.0V" => 1,
+            "9.0V" => 2,
+            "10.0V" => 3,
+            "12.0V" => 4,
+            "14.0V" => 5,
+            "16.0V" => 6,
+            _ => 0
+        };
+
+    private void HandlePartialVppHeader(string text)
+    {
+        if (_activeAction != "m") return;
+        var match = VppStepPrefixPattern.Match(text);
+        if (!match.Success) return;
+        string target = match.Groups[1].Value.Trim();
+        int step = VppStepNumber(target);
+        if (step == 0 || step == _lastAnnouncedVppStep) return;
+        _lastAnnouncedVppStep = step;
+        Emit(ProgrammerProgressKind.VoltageStep,
+            $"Measuring {target} — step {step}/6…", step, 6);
     }
 
     private void Check()
@@ -157,6 +347,19 @@ public sealed class NativeAfterburner
                         response.Contains("VPP-CAL-OK", StringComparison.OrdinalIgnoreCase);
                     Log("Connected firmware: " + response.Split('\n').FirstOrDefault(x => x.Contains("AFTerburner v."))?.Trim());
                     Log(_varVpp ? "Variable VPP board detected." : "Variable VPP was not detected; calibration is unavailable.");
+                    ExternalRamStatus = response.Contains("SeRAM:23LC512", StringComparison.Ordinal)
+                        ? "23LC512 detected (diagnostics only)"
+                        : response.Contains("SeRAM:23LC1024", StringComparison.Ordinal)
+                        ? "23LC1024 detected (diagnostics only)"
+                        : response.Contains("SeRAM:None", StringComparison.Ordinal)
+                        ? "Not detected"
+                        : response.Contains("SeRAM:NotChecked", StringComparison.Ordinal)
+                        ? "Detection unavailable on this board"
+                        : "Not reported by firmware";
+                    Log("External serial SRAM: " + ExternalRamStatus);
+                    string fw = response.Split('\n').FirstOrDefault(x => x.Contains("AFTerburner v."))?.Trim() ?? "AFTerburner";
+                    _connectionSummary = $"Firmware: {fw}   |   Variable VPP: {(_varVpp ? (_calibrationVerified ? "calibrated" : "check required") : "not detected")}   |   SRAM: {ExternalRamStatus}";
+                    Emit(ProgrammerProgressKind.Connection, _connectionSummary);
                     return;
                 }
             }
@@ -184,10 +387,21 @@ public sealed class NativeAfterburner
             if (ch == '\n')
             {
                 var info = line.ToString().Trim();
-                if (stream && info.Length > 0 && info != ">" && !info.StartsWith("OK ")) Log(info);
+                if (stream && info.Length > 0 && info != ">" && !info.StartsWith("OK ")) {
+                    HandleFirmwareLine(info); // independently of diagnostic log presentation
+                    Log(info);
+                }
                 line.Clear();
             }
-            else if (ch != '\r') line.Append(ch);
+            else if (ch != '\r')
+            {
+                line.Append(ch);
+                // The second ':' in "VPP: 9.0V :" arrives before the value.
+                // Updating the GUI here makes each physical measurement step
+                // visible even if the voltage value arrives later.
+                if (stream && ch == ':' && line.Length > 5)
+                    HandlePartialVppHeader(line.ToString());
+            }
             if (sb.Length >= 3 && sb[sb.Length - 3] == '>' && sb[sb.Length - 2] == '\r' && sb[sb.Length - 1] == '\n')
                 return sb.ToString();
         }
@@ -254,7 +468,11 @@ public sealed class NativeAfterburner
                 hex.Append(value.ToString("X2", CultureInfo.InvariantCulture));
             }
             if (nonzero) Command("#f " + bitStart.ToString("D4", CultureInfo.InvariantCulture) + " " + hex, show: false);
-            if (bitStart % 512 == 0) _log?.Report($"Uploading fusemap: {Math.Min(bitStart + 32, total)}/{total} bits");
+            if (bitStart % 512 == 0) {
+                int sent = Math.Min(bitStart + 32, total);
+                _log?.Report($"Uploading fusemap: {sent}/{total} bits");
+                Emit(ProgrammerProgressKind.Progress, "Transferring fusemap…", sent, total);
+            }
         }
         string checksumReply = Command("#c " + ((ushort)checksum).ToString("X4", CultureInfo.InvariantCulture), show: false);
         if (!checksumReply.Contains("OK checksum matches", StringComparison.Ordinal))
@@ -268,10 +486,23 @@ public sealed class NativeAfterburner
     private void RunCalibration(string action, int offset)
     {
         if (action != "s" && !_varVpp) throw new InvalidOperationException("The firmware does not support variable VPP; calibration and measurement are unavailable.");
+        Emit(ProgrammerProgressKind.Stage, action switch {
+            "s" => "Adjusting VPP — chip removed or VPP physically isolated from socket.",
+            "b" => "Calibrating VPP — chip removed or VPP physically isolated from socket.",
+            _ => "Measuring VPP — chip removed or VPP physically isolated from socket."
+        });
         switch (action)
         {
+            // Studio speaks directly to the firmware; CLI's interactive YES prompt
+            // is not part of the serial wire protocol and must never be sent here.
             case "s": Command("t", seconds: 29); break;
-            case "m": Command("m", seconds: 43); break;
+            case "m":
+                Emit(ProgrammerProgressKind.VoltageStep,
+                    "Measuring 4.2–5.0 V — step 1/6…", 1, 6);
+                Command("m", seconds: 43);
+                if (_vppPointCount != 6)
+                    throw new IOException($"Incomplete VPP measurement: {_vppPointCount}/6 voltage points received.");
+                break;
             case "b":
                 if (offset < -32 || offset > 32) throw new ArgumentOutOfRangeException(nameof(offset));
                 Command("B" + (char)('0' + offset + 32), show: false);
@@ -289,14 +520,18 @@ public sealed class NativeAfterburner
         if (action is not ("e" or "ew" or "w")) throw new NotSupportedException("Unsupported JTAG operation: " + action);
         if (action == "e" || action == "ew")
         {
+            Emit(ProgrammerProgressKind.Stage, "Erasing JTAG device…");
             if (erase is null || erase.Length == 0)
                 throw new InvalidOperationException("ATF150x erase requires the matching erase_*.xsvf file from Afterburner.");
             PlayXsvf(erase, vpp: true);
+            AddDetail("JTAG erase XSVF completed without a reported player error.");
         }
         if (action is "ew" or "w")
         {
+            Emit(ProgrammerProgressKind.Stage, "Programming JTAG/XSVF…");
             if (image is null || image.Length == 0) throw new InvalidOperationException("No design XSVF file supplied.");
             PlayXsvf(image, vpp: false);
+            AddDetail("JTAG design XSVF completed without a reported player error. Verify according to the XSVF script.");
         }
     }
 
@@ -324,7 +559,10 @@ public sealed class NativeAfterburner
                 {
                     _port!.Write(data, sent, len);
                     sent += len;
-                    if (sent == data.Length || sent % 1024 < len) _log?.Report($"XSVF sent {sent}/{data.Length} B");
+                    if (sent == data.Length || sent % 1024 < len) {
+                        _log?.Report($"XSVF sent {sent}/{data.Length} B");
+                        Emit(ProgrammerProgressKind.Progress, "Transferring XSVF…", sent, data.Length);
+                    }
                 }
                 continue;
             }

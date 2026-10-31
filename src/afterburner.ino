@@ -452,6 +452,8 @@ uint8_t lineIndex; // maximum index is 31; saves one SRAM byte on AVR
 char endOfLine;
 char mapUploaded;
 char isUploading;
+char discardUntilEol;
+char uploadTypeSelected;
 char uploadError;
 char uploadChecksumOk;
 char uploadDataReceived;
@@ -460,6 +462,7 @@ char varVppCalibrationOk;
 unsigned char fusemap[MAXFUSES];
 unsigned char flagBits;
 char varVppExists;
+uint8_t seRamDetected = 0; // 0 = absent, 1 = 23LC512, 2 = 23LC1024
 uint8_t lastShiftRegVal = 0;
 
 static char getFuseBit(unsigned short bitPos);
@@ -496,6 +499,12 @@ void printHelp(char full) {
   if (varVppExists) {
     Serial.println(F(" varVpp "));
     Serial.println(varVppCalibrationOk ? F(" VPP-CAL-OK ") : F(" VPP-CAL-MISSING "));
+    if (seRamDetected == 1) Serial.println(F(" SeRAM:23LC512 "));
+    else if (seRamDetected == 2) Serial.println(F(" SeRAM:23LC1024 "));
+    else Serial.println(F(" SeRAM:None "));
+  } else {
+    // Old boards have no supported RAM bus; distinguish from a completed probe.
+    Serial.println(F(" SeRAM:NotChecked "));
   }
 #ifdef RAM_BIG
     Serial.println(F(" RAM-BIG "));
@@ -706,6 +715,9 @@ void setup() {
 // initialize serial:
   Serial.begin(57600);
   isUploading = 0;
+  discardUntilEol = 0;
+  uploadTypeSelected = 0;
+  seRamDetected = 0;
   endOfLine = 0;
   echoEnabled = 0;
   mapUploaded = 0;
@@ -740,14 +752,17 @@ void setup() {
       Serial.println(F("I: VPP calib. OK"));
     }
 
-    //setup serial RAM
-    if (seRamInit()) {
+    // Diagnostics only: the fusemap remains in internal SRAM.
+    seRamDetected = seRamInit();
+    if (seRamDetected) {
       Serial.println(F("I: SeRAM OK"));
     }
+    // Restore idle state on the shared serial lines after detection.
+    varVppSet(VPP_5V0);
   }
   printHelp(0);
 
-  Serial.println(">");
+  Serial.println(F(">"));
 }
 
 static void sparseSetup(char clearArray){
@@ -784,24 +799,40 @@ char handleTerminalCommands() {
 
   while (Serial.available() > 0) {
     c = Serial.read();
-    line[lineIndex] = c;
+    // A rejected line may arrive over multiple serial packets.
+    // Never parse its trailing bytes as a new instruction.
+    if (discardUntilEol) {
+      if (c == '\n' || c == '\r') {
+        discardUntilEol = 0;
+        lineIndex = 0;
+        endOfLine = 0;
+        break;
+      }
+      continue;
+    }
+    // Do not interpret an empty LF after a CR-terminated command as a command.
+    if (lineIndex == 0 && (c == '\n' || c == '\r')) continue;
+    if (lineIndex >= (uint8_t)(sizeof(line) - 2)) {
+      discardUntilEol = 1;
+      lineIndex = 0;
+      endOfLine = 0;
+      mapUploaded = 0;
+      if (isUploading) {
+        uploadError = 1;
+        uploadChecksumOk = 0;
+        isUploading = 0;
+        Serial.println(F("ER upload aborted: input line too long"));
+      } else {
+        Serial.println(F("ER input line too long"));
+      }
+      continue;
+    }
+    line[lineIndex++] = c;
     if (c == '\n' || c == '\r') {
       endOfLine = 1;
+      break; // one command per loop; leave subsequent bytes buffered
     }
-    //echo input to output
-    else {
-      if (!isUploading && echoEnabled) {
-        Serial.print(c);
-      }
-    }
-    if (lineIndex >= (uint8_t)(sizeof(line) - 2)) {
-      lineIndex = 0;
-      readGarbage();
-      Serial.println();
-      Serial.println(F("Error: line too long."));
-    } else {
-      lineIndex++;
-    }
+    if (!isUploading && echoEnabled) Serial.print(c);
   }
   if (endOfLine) {
     c = COMMAND_NONE;
@@ -919,13 +950,64 @@ int32_t parse4hex(uint8_t i) {
 // c <checksum> : checksum of the whole fuse map
 // e : end ofthe upload transfer - returns to terminal
 
+// The input line is always NUL terminated by handleTerminalCommands().
+static uint8_t uploadLineLength(void) {
+  uint8_t i = 0;
+  while (i < sizeof(line) && line[i] && line[i] != '\r' && line[i] != '\n') i++;
+  return i;
+}
+
+static bool uploadIsDigit(char c) { return c >= '0' && c <= '9'; }
+static bool uploadIsHex(char c) {
+  return uploadIsDigit(c) || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+}
+static void rejectUploadLine(void) {
+  uploadError = 1;
+  uploadChecksumOk = 0;
+  mapUploaded = 0;
+  Serial.println(F("ER invalid upload data"));
+}
+
+// The sparse codec refuses allocation before writing outside fusemap[].
+// Report the actual compiled capacity, not the overall MCU SRAM size.
+static void printFusemapCapacityError(void) {
+  Serial.print(F("ER fusemap overflow: "));
+#ifdef USE_SPARSE_FUSEMAP
+  if (sparseFusemapStat) {
+    Serial.print((uint16_t)(sparseFusemapStat & 0x7FF), DEC);
+    Serial.print('/');
+  }
+#endif
+  Serial.print((uint16_t)sizeof(fusemap), DEC);
+  Serial.println(F(" bytes capacity"));
+}
+
 void parseUploadLine() {
+  const uint8_t len = uploadLineLength();
+  // Once one line is rejected, nothing can make this transfer valid again.
+  if (uploadError && !(len == 2 && line[1] == 'e')) {
+    Serial.println(F("ER upload already failed"));
+    lineIndex = 0;
+    return;
+  }
+  if (len < 2 || line[0] != '#') {
+    rejectUploadLine();
+    lineIndex = 0;
+    return;
+  }
+
   switch (line[1]) {
     case 'e': {
-      // Type-only upload (u / #t / #e) is used for read and erase.
-      // Never falsely advertise a fusemap upload as complete without #c.
+      if (len != 2 || !uploadTypeSelected) {
+        rejectUploadLine();
+        isUploading = 0;
+        break;
+      }
+      // Type-only upload (#t, #e) is used for reads and erases.
       mapUploaded = (!uploadError && uploadChecksumOk && !fuseMapOverflow);
-      if (uploadError || fuseMapOverflow || (uploadDataReceived && !uploadChecksumOk)) {
+      if (fuseMapOverflow) {
+        printFusemapCapacityError();
+      } else if (uploadError || (uploadDataReceived && !uploadChecksumOk)) {
         Serial.print(F("ER upload failed"));
       } else if (uploadChecksumOk) {
         Serial.print(F("OK upload finished"));
@@ -935,75 +1017,90 @@ void parseUploadLine() {
       isUploading = 0;
     } break;
 
-    // gal type
     case 't': {
-      short v = line[3] - '0';
-      uploadChecksumOk = 0;
-      uploadDataReceived = 0;
-      if (v > 0 && v < LAST_GAL_TYPE) {
-        gal = (GALTYPE) v;
-        copyGalInfo();
-        // Upload begins with 'u' before '#t'. Reinitialize the sparse index for
-        // the selected chip: the previous chip may have been non-sparse.
-        sparseSetup(1);
-        Serial.print(F("OK gal set: "));
-        Serial.println((short) gal, DEC);
-      } else {
-        Serial.println(F("ER unknown gal index"));
-        uploadError = 1;
+      // Firmware type IDs use exactly one ASCII character ('0' + index).
+      // The optional device name is retained for compatibility with CLI and Studio.
+      bool valid = len >= 4 && line[2] == ' ';
+      if (len > 4) {
+        valid = valid && line[4] == ' ' && len > 5;
+        for (uint8_t i = 5; i < len; ++i) {
+          const char c = line[i];
+          if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                uploadIsDigit(c) || c == '-' || c == '_' || c == '.')) valid = false;
+        }
       }
+      const int16_t type = (int16_t)line[3] - '0';
+      if (!valid || type <= 0 || type >= LAST_GAL_TYPE || uploadDataReceived) {
+        rejectUploadLine();
+        break;
+      }
+      gal = (GALTYPE)type;
+      copyGalInfo();
+      sparseSetup(1);
+      uploadTypeSelected = 1;
+      uploadChecksumOk = 0;
+      Serial.print(F("OK gal set: "));
+      Serial.println(type, DEC);
     } break;
 
-    //fusemap data
     case 'f': {
-      char i = 8;
-      char j;
-      unsigned short addr;
-      short v;
-      char fiveDigitAddr = (line[7] != ' ') ? 1 : 0;
-
-      addr = parse45dec(3, fiveDigitAddr);
-      i += fiveDigitAddr;
+      // #f <4|5 decimal digits> <1..4 complete hex bytes>
+      if (!uploadTypeSelected || len < 10 || line[2] != ' ') {
+        rejectUploadLine();
+        break;
+      }
+      const uint8_t digits = line[7] == ' ' ? 4 : 5;
+      const uint8_t dataPos = 4 + digits;
+      bool valid = (line[dataPos - 1] == ' ') && (len > dataPos);
+      const uint8_t hexChars = (len > dataPos) ? len - dataPos : 0;
+      valid = valid && (hexChars >= 2 && hexChars <= 8 && (hexChars & 1) == 0);
+      for (uint8_t i = 3; i < 3 + digits; ++i) if (!uploadIsDigit(line[i])) valid = false;
+      for (uint8_t i = dataPos; i < len; ++i) if (!uploadIsHex(line[i])) valid = false;
+      if (!valid) {
+        rejectUploadLine();
+        break;
+      }
+      uint16_t addr = 0;
+      for (uint8_t i = 3; i < 3 + digits; ++i) addr = addr * 10 + (line[i] - '0');
+      const uint16_t allowedFuses = galinfo.fuses + ((flagBits & FLAG_BIT_APD) ? 1 : 0);
+      if (addr >= allowedFuses) {
+        rejectUploadLine();
+        break;
+      }
       uploadDataReceived = 1;
       uploadChecksumOk = 0;
-      const uint16_t allowedFuses = galinfo.fuses + ((flagBits & FLAG_BIT_APD) ? 1 : 0);
-      if (addr >= allowedFuses) uploadError = 1;
-
-      do {
-        v = parse2hex(i);
-        if (v >= 0) {
-          for (j = 0; j < 8; j++) {
-            // if fuse bit is set -> then change the fusemap
-            if (addr >= allowedFuses) {
-              // Accept zero padding in the final byte, never nonzero out-of-range bits.
-              if (v & (1 << j)) uploadError = 1;
-            } else if (!uploadError && (v & (1 << j))) {
-              setFuseBit(addr);
-            }
-            addr++;
+      for (uint8_t i = dataPos; i < len; i += 2) {
+        const uint8_t value = (toHex(line[i]) << 4) | toHex(line[i + 1]);
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+          if (addr >= allowedFuses) {
+            if (value & (1 << bit)) uploadError = 1; // only zero padding accepted
+          } else if (!uploadError && (value & (1 << bit))) {
+            setFuseBit(addr);
           }
-          i += 2;
+          addr++;
         }
-      } while (v >= 0);
-
+      }
       if (fuseMapOverflow) uploadError = 1;
-      // Fusemap becomes usable only after a matching checksum and #e.
       if (uploadError) {
-        Serial.println(F("ER fusemap data rejected"));
+        if (fuseMapOverflow) printFusemapCapacityError();
+        else Serial.println(F("ER fusemap data rejected"));
       } else {
         Serial.print(F("OK "));
-        Serial.println((short) addr, DEC);
+        Serial.println(addr, DEC);
       }
     } break;
 
-    //checksum
     case 'c': {
-      const int32_t val = parse4hex(3);
-      unsigned char apdFuse = (flagBits & FLAG_BIT_APD) ? 1 : 0;
-      unsigned short cs = checkSum(galinfo.fuses + apdFuse);
-      if (!uploadError && !fuseMapOverflow && val >= 0 && cs == (uint16_t)val) {
+      bool valid = uploadTypeSelected && len == 7 && line[2] == ' ';
+      for (uint8_t i = 3; i < 7 && valid; ++i) if (!uploadIsHex(line[i])) valid = false;
+      if (!valid) {
+        rejectUploadLine();
+        break;
+      }
+      const int32_t value = parse4hex(3);
+      const uint16_t cs = checkSum(galinfo.fuses + ((flagBits & FLAG_BIT_APD) ? 1 : 0));
+      if (!uploadError && !fuseMapOverflow && value >= 0 && cs == (uint16_t)value) {
         Serial.println(F("OK checksum matches"));
-        // An all-zero conditioning fusemap is valid if its checksum matches.
         uploadChecksumOk = 1;
       } else {
         uploadError = 1;
@@ -1011,26 +1108,25 @@ void parseUploadLine() {
         Serial.print(F("ER checksum:"));
         Serial.print(cs, HEX);
         Serial.print(F(" expected:"));
-        Serial.println(val, HEX);
+        Serial.println(value, HEX);
       }
     } break;
-    
-    // PES
+
     case 'p': {
-      uint8_t i = 0;
-      uint8_t j = 3;
-      while (i < 8) {
-        pes[i] = parse2hex(j);
-        i++;
-        j+=3; //AB:00:...  - 3 characters per one PES byte
+      // PES data is exactly 8 hex bytes, separated by ':' (legacy format).
+      bool valid = uploadTypeSelected && len == 26 && line[2] == ' ';
+      for (uint8_t i = 0; i < 8 && valid; ++i) {
+        const uint8_t pos = 3 + 3 * i;
+        if (!uploadIsHex(line[pos]) || !uploadIsHex(line[pos + 1])) valid = false;
+        if (i != 7 && line[pos + 2] != ':') valid = false;
       }
+      if (!valid) { rejectUploadLine(); break; }
+      for (uint8_t i = 0; i < 8; ++i) pes[i] = parse2hex(3 + 3 * i);
     } break;
 
     default:
-      uploadError = 1;
-      Serial.println(F("ER unknown upload cmd"));
+      rejectUploadLine();
   }
-
   lineIndex = 0;
 }
 // *********************************************************
@@ -2924,6 +3020,7 @@ void loop() {
         }
         sparseSetup(1);
         isUploading = 1;
+        uploadTypeSelected = 0;
         uploadError = 0;
         mapUploaded = 0;
         uploadChecksumOk = 0;
@@ -2968,7 +3065,7 @@ void loop() {
       case COMMAND_READ_FUSES : {
         if (doTypeCheck()) {
           readOrVerifyGal(0); //just read, no verification
-          if (fuseMapOverflow) Serial.println(F("ER fusemap exceeds SRAM capacity"));
+          if (fuseMapOverflow) printFusemapCapacityError();
           else printJedec();
         }
       } break;
