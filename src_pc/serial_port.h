@@ -1,6 +1,11 @@
 #ifndef _SERIAL_PORT_H_
 #define _SERIAL_PORT_H_
 
+/* The Win32 serial implementation is selected by default on Windows. */
+#if defined(_WIN32) && !defined(_USE_WIN_API_)
+#define _USE_WIN_API_
+#endif
+
 
 char guessedSerialDevice[512] = {0};
 
@@ -86,6 +91,7 @@ static inline SerialDeviceHandle serialDeviceOpen(char* deviceName) {
         result = GetCommState(h, &dcbSerialParams);
 
         if (!result) {
+            CloseHandle(h);
             return INVALID_HANDLE;
         }
 
@@ -104,6 +110,7 @@ static inline SerialDeviceHandle serialDeviceOpen(char* deviceName) {
 
         result = SetCommState(h, &dcbSerialParams);
         if (!result) {
+            CloseHandle(h);
             return INVALID_HANDLE;
         }
 
@@ -115,6 +122,7 @@ static inline SerialDeviceHandle serialDeviceOpen(char* deviceName) {
 
         result = SetCommTimeouts(h, &timeouts);
         if (!result) {
+            CloseHandle(h);
             return INVALID_HANDLE;
         }
         //ensure no leftover bytes exist on the serial line
@@ -142,8 +150,10 @@ void serialDeviceCheckName(char* name, int maxSize) {
     if (strncmp(name, "COM", 3) == 0 && (nameLen > 4 && name[3] >= '0' && name[3] <= '9')) {
         if (nameLen + 4 < maxSize) {
             int i;
-            for (i = nameLen - 1; i >= 0; i--) {
-                name[ i + 4] = name[i]; 
+            // Shift the terminating NUL too: COM10+ otherwise contains a
+            // stale terminator and CreateFile receives the wrong device name.
+            for (i = nameLen; i >= 0; i--) {
+                name[i + 4] = name[i];
             }
             name[0] = '\\';
             name[1] = '\\';
@@ -161,13 +171,13 @@ static inline void serialDeviceClose(SerialDeviceHandle deviceHandle) {
 
 static inline int serialDeviceWrite(SerialDeviceHandle deviceHandle, char* buffer, int bytesToWrite) {
     DWORD written = 0;
-    WriteFile(deviceHandle, buffer, bytesToWrite, &written, NULL);
+    if (!WriteFile(deviceHandle, buffer, bytesToWrite, &written, NULL)) return -1;
     return (int) written;
 }
 
 static inline int serialDeviceRead(SerialDeviceHandle deviceHandle, char* buffer, int bytesToRead) {
     DWORD read = 0;
-    ReadFile(deviceHandle, buffer, bytesToRead, &read, NULL);
+    if (!ReadFile(deviceHandle, buffer, bytesToRead, &read, NULL)) return -1;
     return (int) read;
 }
 

@@ -793,48 +793,48 @@ static char* printBuffer(char* bufPrint, int readSize) {
     return bufPrint;
 }
 
-static int waitForSerialPrompt(char* buf, int bufSize, int maxDelay) {
-    char* bufStart = buf;
-    int bufTotal = bufSize;
-    int bufPos = 0;
-    int readSize;
-    char* bufPrint = buf;
-    char doPrint = printSerialWhileWaiting;
-    
-    memset(buf, 0, bufSize);
-
-    while (maxDelay > 0) {
-        readSize = serialDeviceRead(serialF, buf, bufSize);
-        if (readSize > 0) {
-            bufPos += readSize;
-            if (checkPromptExists(bufStart, bufTotal) >= 0) {
-                maxDelay = 4; //force exit, but read the rest of the line
-            } else {
-                buf += readSize;
-                bufSize -= readSize;
-                if (bufSize <= 0) {
-                    printf("ERROR: serial port read buffer is too small!\nAre you dumping large amount of data?\n");
-                    return -1;
-                }
-            }
-            if (printSerialWhileWaiting) {
-                bufPrint = printBuffer(bufPrint, readSize);
-            }                
-        }
-        if (maxDelay > 0) {
-        /* WIN_API handles timeout itself */
+// An empty nonblocking POSIX read is not a connection failure.
+static int readSerialAvailable(char* buf, int length) {
+    int n = serialDeviceRead(serialF, buf, length);
 #ifndef _USE_WIN_API_
-            usleep(10 * 1000);
-            maxDelay -= 10;
-#else
-            maxDelay -= 30;           
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+        return 0;
 #endif
-            if(maxDelay <= 0 && verbose) {
-                printf("waitForSerialPrompt timed out\n");
-            }
+    return n;
+}
+
+static int waitForSerialPrompt(char* buf, int bufSize, int maxDelay) {
+    int pos = 0;
+    if (buf == NULL || bufSize < 4) return -1;
+    memset(buf, 0, bufSize);
+    while (maxDelay > 0) {
+        const int available = bufSize - pos - 1;
+        if (available <= 0) {
+            fprintf(stderr, "ERROR: serial response exceeds buffer capacity\n");
+            return -1;
         }
+        int n = readSerialAvailable(buf + pos, available);
+        if (n < 0 || n > available) return -1;
+        if (n > 0) {
+            if (printSerialWhileWaiting) {
+                // Display received data but never treat a partial prompt as success.
+                fwrite(buf + pos, 1, n, stdout);
+                fflush(stdout);
+            }
+            pos += n;
+            buf[pos] = 0;
+            if (checkPromptExists(buf, pos) >= 0) return pos;
+        }
+#ifndef _USE_WIN_API_
+        usleep(10 * 1000);
+        maxDelay -= 10;
+#else
+        maxDelay -= 30;
+#endif
     }
-    return bufPos;
+    // Timeout is failure even if we received other text without terminal prompt.
+    if (verbose) fprintf(stderr, "ERROR: serial prompt timeout\n");
+    return -1;
 }
 
 static int sendBuffer(char* buf) {
@@ -849,7 +849,7 @@ static int sendBuffer(char* buf) {
     // file is opened non blocking so we have to ensure all contents is written
     while (total > 0) {
         writeSize = serialDeviceWrite(serialF, buf, total);
-        if (writeSize < 0) {
+        if (writeSize <= 0) {
             printf("ERROR: written: %i (%s)\n", writeSize, strerror(errno));
             return -4;
         }
@@ -879,6 +879,7 @@ static int sendLine(char* buf, int bufSize, int maxDelay) {
     if (total < 0) {
         return total;
     }
+    if (total >= bufSize) return -1;
     obuf[total] = 0;
     obuf = stripPrompt(obuf);
     if (verbose) {
@@ -915,11 +916,11 @@ static char upload() {
 
     // Start  upload
     sprintf(buf, "u\r");
-    sendLine(buf, MAX_LINE, 20);
+    if (sendLine(buf, MAX_LINE, 2000) < 0) return -1;
 
     //device type
     sprintf(buf, "#t %c %s\r", '0' + (int) gal, galinfo[gal].name);
-    sendLine(buf, MAX_LINE, 300);
+    if (sendLine(buf, MAX_LINE, 300) < 0) return -1;
 
     //fuse map
     buf[0] = 0;
@@ -936,7 +937,7 @@ static char upload() {
 #ifdef DEBUG_UPLOAD
                     printf("%s\n", buf);
 #endif
-                    sendLine(buf, MAX_LINE, 100);
+                    if (sendLine(buf, MAX_LINE, 100) < 0) return -1;
                     buf[0] = 0;
                 }
                 fuseSet = 0;
@@ -964,7 +965,7 @@ static char upload() {
 #ifdef DEBUG_UPLOAD
         printf("%s\n", buf);
 #endif
-        sendLine(buf, MAX_LINE, 100);
+        if (sendLine(buf, MAX_LINE, 100) < 0) return -1;
     }
 
     //checksum
@@ -973,7 +974,8 @@ static char upload() {
         printf("sending csum: %04X\n", csum);
     }
     sprintf(buf, "#c %04X\r", csum);
-    sendLine(buf, MAX_LINE, 300);
+    if (sendLine(buf, MAX_LINE, 300) < 0) return -1;
+    if (strstr(buf, "OK checksum matches") == NULL) return -1;
 
     //end of upload
     return sendGenericCommand("#e\r", "Upload failed", 300, 0); 
@@ -995,7 +997,15 @@ char sendGenericCommand(const char* command, const char* errorText, int maxDelay
     } else {
         char* response = stripPrompt(buf);
         char* lastLine = findLastLine(response);
-        if (lastLine == 0 || (lastLine[0] == 'E' && lastLine[1] == 'R')) {
+        int rejected = (lastLine == NULL || lastLine[0] == 0);
+        const char* at = response;
+        while (!rejected && *at) {
+            while (*at == '\r' || *at == '\n') at++;
+            if ((at[0] == 'E' && at[1] == 'R') ||
+                strncmp(at, "Error:", 6) == 0) rejected = 1;
+            while (*at && *at != '\r' && *at != '\n') at++;
+        }
+        if (rejected) {
             printf("%s\n", response);
             return -1;
         } else if (printResult && printSerialWhileWaiting == 0) {
@@ -1309,70 +1319,61 @@ static char operationReadFuses(void) {
 }
 
 
-static int readJtagSerialLine(char* buf, int bufSize, int maxDelay, int* feedRequest) {
-    char* bufStart = buf;
-    int readSize;
-    int bufPos = 0;
-
-    memset(buf, 0, bufSize);
-
-    while (maxDelay > 0) {
-        readSize = serialDeviceRead(serialF, buf, 1);
-        if (readSize > 0) {
-            bufPos += readSize;
-            buf[1] = 0;
-            //handle the feed request
-            if (buf[0] == '$') {
-                char tmp[5];
-                bufPos -= readSize;
-                buf[0] = 0;
-                //extra 5 bytes should be present: 3 bytes of size, 2 new line chars
-                readSize = serialDeviceRead(serialF, tmp, 3);
-                if (readSize == 3) {
-                    int retry = 1000;
-                    tmp[3] = 0;
-                    *feedRequest = atoi(tmp);
-                    maxDelay = 0; //force exit
-
-                    //read the extra 2 characters (new line chars)
-                    while (retry && readSize != 2) {
-                        readSize = serialDeviceRead(serialF, tmp, 2);
-                        retry--;
-                    }
-                    if (readSize != 2 || tmp[0] != '\r' || tmp[1] != '\n') {
-                        printf("Warning: corrupted feed request ! %d \n", readSize);
-                    }
-                } else {
-                    printf("Warning: corrupted feed request! %d \n", readSize);
-                }
-                //printf("***\n");
-            } else
-            if (buf[0] == '\r') {
-                readSize = serialDeviceRead(serialF, buf, 1); // read \n coming from Arduino
-                //printf("-%c-\n", buf[0] == '\n' ? 'n' : 'r');
-                buf[0] = 0;
-                bufPos++;
-                maxDelay = 0; //force exit
-            } else {
-                //printf("(0x%02x %d) \n", buf[0], (int) buf[0]);
-                buf += readSize;
-                if (bufPos == bufSize) {
-                    printf("ERROR: serial port read buffer is too small!\nAre you dumping large amount of data?\n");
-                    return -1;
-                }
-            }
-        }
-        if (maxDelay > 0) {
-        /* WIN_API handles timeout itself */
+// Serial reads may return fewer bytes than requested even when the stream is valid.
+static int readJtagExact(char* dst, int length) {
+    int pos = 0;
+    int attempts = 1000;
+    while (pos < length && attempts-- > 0) {
+        int n = readSerialAvailable(dst + pos, length - pos);
+        if (n < 0 || n > length - pos) return -1;
+        if (n > 0) pos += n;
 #ifndef _USE_WIN_API_
-            usleep(1 * 1000);
-            maxDelay -= 10;
-#else
-            maxDelay -= 30;
+        else usleep(1000);
 #endif
-        }
     }
-    return bufPos;
+    return pos == length ? 0 : -1;
+}
+
+static int readJtagSerialLine(char* buf, int bufSize, int maxDelay, int* feedRequest) {
+    int pos = 0;
+    if (bufSize < 3) return -1;
+    memset(buf, 0, bufSize);
+    *feedRequest = 0;
+    while (maxDelay > 0) {
+        char c;
+        int n = readSerialAvailable(&c, 1);
+        if (n < 0) return -1;
+        if (n > 0) {
+            if (c == '$') {
+                char request[5];
+                if (readJtagExact(request, 5) < 0 ||
+                    request[0] < '0' || request[0] > '9' ||
+                    request[1] < '0' || request[1] > '9' ||
+                    request[2] < '0' || request[2] > '9' ||
+                    request[3] != '\r' || request[4] != '\n') return -1;
+                *feedRequest = (request[0] - '0') * 100 +
+                               (request[1] - '0') * 10 + request[2] - '0';
+                return *feedRequest > 0 ? pos : -1;
+            }
+            if (c == '\r' || c == '\n') {
+                if (c == '\r') {
+                    char lf;
+                    if (readJtagExact(&lf, 1) < 0 || lf != '\n') return -1;
+                }
+                if (pos > 0) return pos;
+                continue;
+            }
+            if (pos >= bufSize - 1) return -1;
+            buf[pos++] = c;
+            buf[pos] = 0;
+        }
+#ifndef _USE_WIN_API_
+        if (n == 0) { usleep(10 * 1000); maxDelay -= 10; }
+#else
+        if (n == 0) maxDelay -= 30;
+#endif
+    }
+    return -1; // timeout, never treat an incomplete JTAG line as success
 }
 
 static int playJtagFile(char* label, int fSize, int vpp, int showProgress) {
@@ -1399,7 +1400,7 @@ static int playJtagFile(char* label, int fSize, int vpp, int showProgress) {
 
     // send start-JTAG-player command
     sprintf(buf, "j%d\r", vpp ? 1: 0);
-    sendBuffer(buf);
+    if (sendBuffer(buf) < 0) { closeSerial(); return -1; }
 
     // read response from MCU and feed the XSVF player with data
     while(1) {
@@ -1408,26 +1409,26 @@ static int playJtagFile(char* label, int fSize, int vpp, int showProgress) {
         feedRequest = 0;
         buf[0] = 0;
         readBytes = readJtagSerialLine(buf, MAX_LINE, 3000, &feedRequest);
+        if (readBytes < 0) { result = -1; break; }
         //printf(">> read %d  len=%d cp=%d '%s'\n", readBytes, (int) strlen(buf), continuePrinting,  buf);
 
         //request to send more data was received
         if (feedRequest > 0) {
+            if (!ready) { result = -1; break; }
             if (ready) {
                 int chunkSize = fSize - sendPos;
                 if (chunkSize > feedRequest) {
                     chunkSize = feedRequest;
-                    // make the initial chunk big so the data are buffered by the OS
-                    if (sendPos == 0) {
-                        chunkSize *= 2;
-                        if (chunkSize > fSize) {
-                            chunkSize = fSize;
-                        }
-                    }
                 }
                 if (chunkSize > 0) {
                     // send the data over serial line
-                    int w = serialDeviceWrite(serialF, galbuffer + sendPos, chunkSize);
-                    sendPos += w;
+                    while (chunkSize > 0) {
+                        int w = serialDeviceWrite(serialF, galbuffer + sendPos, chunkSize);
+                        if (w <= 0 || w > chunkSize) { result = -1; break; }
+                        sendPos += w;
+                        chunkSize -= w;
+                    }
+                    if (result < 0) break;
                     // print progress / file position
                     if (showProgress && (sendPos - lastSendPos >= 1024 || sendPos == fSize)) {
                         lastSendPos = sendPos;
@@ -1456,7 +1457,11 @@ static int playJtagFile(char* label, int fSize, int vpp, int showProgress) {
             }
             // quit
             if (buf[0] == 'Q') {
-                result = atoi(buf + 1);
+                // "Q0" or "Q-0,OK" are the firmware's successful forms.
+                // Do not let atoi() turn an unknown "Q..." string into success.
+                result = (strcmp(buf, "Q0") == 0 || strcmp(buf, "Q-0,OK") == 0)
+                    ? 0 : -1;
+                if (result == 0 && sendPos != fSize) result = -1;
                 //print error result
                 if (result != 0) {
                     printf("%s\n", buf + 1);
@@ -1492,7 +1497,7 @@ static int playJtagFile(char* label, int fSize, int vpp, int showProgress) {
         }
     }
 
-    readJtagSerialLine(buf, MAX_LINE, 1000, &feedRequest);
+    if (result == 0) readJtagSerialLine(buf, MAX_LINE, 1000, &feedRequest);
     closeSerial();
     return result;
 }

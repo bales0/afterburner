@@ -76,6 +76,12 @@ internal static class Program
         Check(port.Commands.Contains("#t ; ATF16V8B") && port.Commands.Contains("#c 0000"), "Wrong GAL ID or checksum");
         Check(port.Commands.TakeLast(2).SequenceEqual(new[]{"w","v"}), "Write/verify order wrong");
         Check(port.Closed && port.Disposed, "Port leak");
+        var noCalibration = new Emulator { VppCalibrationStatus = "VPP-CAL-MISSING" };
+        Check(!Run(noCalibration, Atf, "wv").Succeeded && !noCalibration.Commands.Contains("w"),
+            "A failed startup VPP measurement must block programming");
+        var legacyNoStatus = new Emulator { VppCalibrationStatus = "" };
+        Check(!Run(legacyNoStatus, Atf, "wv").Succeeded && !legacyNoStatus.Commands.Contains("w"),
+            "Legacy firmware without measured-VPP status must not be treated as verified");
         var bits = new byte[Atf.FuseCount]; bits[0]=1; bits[9]=1;
         port = new Emulator();
         Check(Run(port,Atf,"wv",bits:bits).Succeeded && port.Commands.Contains("#f 0000 01020000") &&
@@ -173,6 +179,7 @@ internal sealed class Emulator : ISerialTransport
     public List<string> Commands {get;}=new();
     public string? ErrorCommand {get;init;}
     public string JtagResult {get;init;}="Q-0,OK";
+    public string VppCalibrationStatus {get;init;}="VPP-CAL-OK";
     public CancellationTokenSource? CancelOnWrite {get;init;}
     public bool Closed {get;private set;}
     public bool Disposed {get;private set;}
@@ -189,7 +196,7 @@ internal sealed class Emulator : ISerialTransport
         if(_receive.Count>0) UnreadBeforeCommand=true;
         string cmd=text.TrimEnd('\r'); Commands.Add(cmd);
         if(CancelOnWrite is not null) {CancelOnWrite.Cancel(); return;}
-        if(cmd=="*") Reply("AFTerburner v.0.6.2 varVpp\r\n>\r\n");
+        if(cmd=="*") Reply("AFTerburner v.0.6.4 varVpp " + VppCalibrationStatus + "\r\n>\r\n");
         else if(cmd.StartsWith('j')) Reply("\r\nRXSVF\r\n$003\r\n");
         else if(cmd==ErrorCommand) Reply("ER simulated failure\r\n>\r\n");
         else if(cmd.StartsWith("#c ",StringComparison.Ordinal)) Reply("OK checksum matches\r\n>\r\n");

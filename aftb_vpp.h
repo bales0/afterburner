@@ -381,29 +381,39 @@ static int8_t varVppInit(void) {
 }
 
 //return 1 on success (VPP calibration appears correct), 0 on failure
+// Verify the EEPROM calibration with a REAL ADC reading at every boot.
+// Voltage control is returned to the safe 5 V/off index on ALL exit paths.
+// The hardware socket-power switch must remain OFF while the board starts.
 static int8_t varVppCheckCalibration(void) {
     varVppReadCalib();
-    if (vppWiper[0] == 0) {
-        Serial.println(F("I: VPP not calibrated"));
-        return FAIL;
+    // A corrupt table must never be allowed to select an arbitrary VPP tap.
+    uint8_t previous = 0;
+    for (uint8_t i = 0; i < MAX_WIPER; ++i) {
+        const uint8_t tap = vppWiper[i];
+        if (tap == 0 || (i > 0 && tap < previous)) {
+            varVppSet(VPP_5V0);
+            Serial.println(F("ER: VPP calibration table invalid"));
+            return FAIL;
+        }
+        previous = tap;
     }
-    
-#if 0
-    int16_t v;
-    // This shoots the VPP to 9V - in theory no GALs should have an issue with that voltage.
-    // Also, the On switch should be turned off, preventing VPP to reach the GAL pins.
-    // check actual voltage 
     varVppSet(VPP_9V0);
-    delay(200); //Settle voltage
-    v = varVppMeasureVpp(0);
-    varVppSet(VPP_5V0); //set VPP back to 5V
-    // lower voltages have a good resolution, so we can have a tight voltage check bounds
-    if (v < 890 || v > 910) {
-        Serial.print(F("ER: VPP voltage check of 9V failed. Expected 900, measured "));
-        Serial.println(v);
+    delay(250); // let the voltage divider and boost converter settle
+    const int16_t first = varVppMeasureVpp(0);
+    delay(70);
+    const int16_t second = varVppMeasureVpp(0);
+    varVppSet(VPP_5V0); // ALWAYS return to idle, also on a failed measurement
+    // Measurements use centivolts. Require both samples to be within +/-0.20V
+    // and mutually consistent; never trust EEPROM values without measuring.
+    if (first < 880 || first > 920 || second < 880 || second > 920 ||
+        first - second > 12 || second - first > 12) {
+        Serial.print(F("ER: VPP 9V startup check failed: "));
+        Serial.print(first);
+        Serial.print(' ');
+        Serial.println(second);
         return FAIL;
     }
-#endif
+    Serial.println(F("I: VPP 9V startup measurement OK"));
     return OK;
 }
 

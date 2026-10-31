@@ -27,6 +27,7 @@ public sealed class NativeAfterburner
         _transportFactory = transportFactory ?? (name => new SerialTransport(name));
     private bool _varVpp;
     private bool _calibrationMissing;
+    private bool _calibrationVerified;
     private const int ResponseMax = 320_000;
 
     public Task<NativeResult> RunAsync(string port, ChipProfile chip, string action, byte[]? fuseBits,
@@ -46,14 +47,17 @@ public sealed class NativeAfterburner
         _output.Clear();
         _varVpp = false;
         _calibrationMissing = false;
+        _calibrationVerified = false;
         try
         {
             if (string.IsNullOrWhiteSpace(port)) throw new InvalidOperationException("No serial port selected.");
             _port = _transportFactory(port);
             _port.Open();
             Connect();
-            if (_calibrationMissing && action is not ("s" or "b" or "m"))
-                throw new InvalidOperationException("Variable VPP has no calibration in EEPROM. Calibrate and verify the voltage before programming.");
+            if (_varVpp && !_calibrationVerified && action is not ("s" or "b" or "m"))
+                throw new InvalidOperationException(_calibrationMissing
+                    ? "Variable VPP failed its startup voltage measurement. Verify the hardware and recalibrate with an empty socket."
+                    : "Firmware has not confirmed a measured VPP startup check. Update the firmware before programming.");
             if (action is "s" or "b" or "m")
             {
                 RunCalibration(action, offset);
@@ -149,6 +153,8 @@ public sealed class NativeAfterburner
                 {
                     _varVpp = response.Contains("varVpp", StringComparison.OrdinalIgnoreCase);
                     _calibrationMissing = response.Contains("VPP-CAL-MISSING", StringComparison.OrdinalIgnoreCase);
+                    _calibrationVerified = _varVpp && !_calibrationMissing &&
+                        response.Contains("VPP-CAL-OK", StringComparison.OrdinalIgnoreCase);
                     Log("Connected firmware: " + response.Split('\n').FirstOrDefault(x => x.Contains("AFTerburner v."))?.Trim());
                     Log(_varVpp ? "Variable VPP board detected." : "Variable VPP was not detected; calibration is unavailable.");
                     return;

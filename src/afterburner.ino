@@ -38,7 +38,7 @@
 
 
 #include <EEPROM.h>                                                                    
-#define VERSION "0.6.4"
+#define VERSION "0.6.3"
 
 //#define DEBUG_PES
 //#define DEBUG_VERIFY
@@ -454,6 +454,7 @@ char mapUploaded;
 char isUploading;
 char uploadError;
 char uploadChecksumOk;
+char uploadDataReceived;
 char fuseMapOverflow;
 char varVppCalibrationOk;
 unsigned char fusemap[MAXFUSES];
@@ -709,6 +710,7 @@ void setup() {
   echoEnabled = 0;
   mapUploaded = 0;
   uploadChecksumOk = 0;
+  uploadDataReceived = 0;
   fuseMapOverflow = 0;
   varVppCalibrationOk = 0;
   lineIndex = 0;
@@ -728,14 +730,15 @@ void setup() {
   setupGpios(INPUT);
 
   if (varVppExists) {
-    // reads the calibration values
+    // SPI clock/data are shared. Disable the shift register BEFORE the VPP
+    // ADC test, to avoid inadvertently clocking the ZIF output register.
+    pinMode(PIN_SHR_CS, OUTPUT);
+    digitalWrite(PIN_SHR_CS, 1);
+    varVppSet(VPP_5V0);
     varVppCalibrationOk = varVppCheckCalibration();
     if (varVppCalibrationOk) {
       Serial.println(F("I: VPP calib. OK"));
     }
-    // set shift reg Chip select
-    pinMode(PIN_SHR_CS, OUTPUT);
-    digitalWrite(PIN_SHR_CS, 1); //unselect the POT's SPI bus
 
     //setup serial RAM
     if (seRamInit()) {
@@ -868,23 +871,31 @@ unsigned char toHex(char c) {
 
 // Parses hexdecimal integer number typed as 2 digit.
 // Returns the number value.
-unsigned short parse2hex(uint8_t i) {
-  if (line[i] == '\r' || line[i] ==  0 || line[i] == ' ') {
-    return -1; 
-  }
-  
-  unsigned short v = toHex(line[i++]) << 4;
-  return v + toHex(line[i]); 
+// -1 is a required signed terminator for the #f hex-data parser.
+int16_t parse2hex(uint8_t i) {
+  if ((uint16_t)i + 1 >= sizeof(line) ||
+      line[i] == '\r' || line[i] == 0 || line[i] == ' ')
+    return -1;
+  const char hi = line[i], lo = line[i + 1];
+  const bool validHi = (hi >= '0' && hi <= '9') || (hi >= 'A' && hi <= 'F') || (hi >= 'a' && hi <= 'f');
+  const bool validLo = (lo >= '0' && lo <= '9') || (lo >= 'A' && lo <= 'F') || (lo >= 'a' && lo <= 'f');
+  if (!validHi || !validLo) return -1;
+  return (int16_t)((toHex(hi) << 4) | toHex(lo));
 }
 
 // Parses hexdecimal integer number typed as 4 digit.
 // Returns the number value.
-unsigned short parse4hex(uint8_t i) {
-  unsigned short v;
-  if (line[i] == '\r' || line[i] ==  0 || line[i] == ' ') {
-    return -1; 
+int32_t parse4hex(uint8_t i) {
+  uint16_t v;
+  if ((uint16_t)i + 3 >= sizeof(line) ||
+      line[i] == '\r' || line[i] == 0 || line[i] == ' ') {
+    return -1; // negative sentinel cannot collide with valid 16-bit checksum
   }
-  
+  for (uint8_t j = 0; j < 4; ++j) {
+    char ch = line[i + j];
+    if (!((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F') ||
+          (ch >= 'a' && ch <= 'f'))) return -1;
+  }
   v = toHex(line[i++]);
   v <<= 4;
   v |= toHex(line[i++]);
@@ -911,11 +922,15 @@ unsigned short parse4hex(uint8_t i) {
 void parseUploadLine() {
   switch (line[1]) {
     case 'e': {
+      // Type-only upload (u / #t / #e) is used for read and erase.
+      // Never falsely advertise a fusemap upload as complete without #c.
       mapUploaded = (!uploadError && uploadChecksumOk && !fuseMapOverflow);
-      if (uploadError || fuseMapOverflow) {
+      if (uploadError || fuseMapOverflow || (uploadDataReceived && !uploadChecksumOk)) {
         Serial.print(F("ER upload failed"));
-      } else {
+      } else if (uploadChecksumOk) {
         Serial.print(F("OK upload finished"));
+      } else {
+        Serial.print(F("OK gal type selected"));
       }
       isUploading = 0;
     } break;
@@ -924,6 +939,7 @@ void parseUploadLine() {
     case 't': {
       short v = line[3] - '0';
       uploadChecksumOk = 0;
+      uploadDataReceived = 0;
       if (v > 0 && v < LAST_GAL_TYPE) {
         gal = (GALTYPE) v;
         copyGalInfo();
@@ -948,8 +964,10 @@ void parseUploadLine() {
 
       addr = parse45dec(3, fiveDigitAddr);
       i += fiveDigitAddr;
+      uploadDataReceived = 1;
       uploadChecksumOk = 0;
       const uint16_t allowedFuses = galinfo.fuses + ((flagBits & FLAG_BIT_APD) ? 1 : 0);
+      if (addr >= allowedFuses) uploadError = 1;
 
       do {
         v = parse2hex(i);
@@ -970,17 +988,20 @@ void parseUploadLine() {
 
       if (fuseMapOverflow) uploadError = 1;
       // Fusemap becomes usable only after a matching checksum and #e.
-      if (uploadError) Serial.println(F("ER fusemap data rejected"));
-      Serial.print(F("OK "));
-      Serial.println((short) addr, DEC);
+      if (uploadError) {
+        Serial.println(F("ER fusemap data rejected"));
+      } else {
+        Serial.print(F("OK "));
+        Serial.println((short) addr, DEC);
+      }
     } break;
 
     //checksum
     case 'c': {
-      unsigned short val = parse4hex(3);
+      const int32_t val = parse4hex(3);
       unsigned char apdFuse = (flagBits & FLAG_BIT_APD) ? 1 : 0;
       unsigned short cs = checkSum(galinfo.fuses + apdFuse);
-      if (!uploadError && !fuseMapOverflow && cs == val) {
+      if (!uploadError && !fuseMapOverflow && val >= 0 && cs == (uint16_t)val) {
         Serial.println(F("OK checksum matches"));
         // An all-zero conditioning fusemap is valid if its checksum matches.
         uploadChecksumOk = 1;
@@ -2816,11 +2837,13 @@ static void calibrateVpp(void) {
     printVariableVppNotSupportedError();
     return;
   }
+  varVppCalibrationOk = 0;
   if (varVppCalibrate()) {
-    varVppCalibrationOk = 1;
-    Serial.println(F("Calibration OK"));
-  } else {
-    varVppCalibrationOk = 0;
+    // Calibration algorithm success alone is not sufficient: immediately
+    // verify the stored table and the actual 9 V output via ADC.
+    varVppCalibrationOk = varVppCheckCalibration();
+    if (varVppCalibrationOk) Serial.println(F("Calibration OK"));
+    else Serial.println(F("ER: calibrated VPP failed measured verification"));
   }
 }
 
@@ -2904,6 +2927,7 @@ void loop() {
         uploadError = 0;
         mapUploaded = 0;
         uploadChecksumOk = 0;
+        uploadDataReceived = 0;
         fuseMapOverflow = 0;
       } break;
 
@@ -2915,7 +2939,9 @@ void loop() {
       // read and print the PES
       case COMMAND_READ_PES : {
         char type;
-        if (gal == PEEL18CV8) {
+        if (varVppExists && !varVppCalibrationOk) {
+            Serial.println(F("ER VPP calibration missing"));
+        } else if (gal == PEEL18CV8) {
             printUnsupportedError();
         } else {
             readPes();
@@ -2927,7 +2953,9 @@ void loop() {
 
       case COMMAND_WRITE_PES : {
         char type;
-        if (gal == PEEL18CV8) {
+        if (varVppExists && !varVppCalibrationOk) {
+            Serial.println(F("ER VPP calibration missing"));
+        } else if (gal == PEEL18CV8) {
             printUnsupportedError();
         } else {
             type = checkGalTypeViaPes();
