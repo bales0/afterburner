@@ -686,6 +686,14 @@ static int openSerial(void) {
 
         bigRam = 0;
         if (labelPos >= 0 && labelPos < 500 && buf[total - 3] == '>') {
+            // Show the firmware banner, not the CLI's compile-time VERSION.
+            // Restrict the printed text to the first line in the received banner.
+            if (verbose) {
+                const char* start = buf + labelPos;
+                const char* end = strpbrk(start, "\r\n");
+                int length = end ? (int)(end - start) : (int)strlen(start);
+                printf("Connected firmware: %.*s\n", length, start);
+            }
             // check for new board desgin: variable VPP
             varVppExists = checkForString(buf, labelPos, " varVpp ");
             if (verbose && varVppExists) {
@@ -1129,6 +1137,12 @@ static char operationCalibrateVpp(void) {
     if (openSerial() != 0) {
         return -1;
     }
+    // The board type is known only AFTER openSerial() reads its banner.
+    if (!varVppExists) {
+        fprintf(stderr, "Error: variable VPP board not detected; calibration unavailable.\n");
+        closeSerial();
+        return -1;
+    }
 
     sprintf(cmd, "B%c\r", val);
     if (verbose) {
@@ -1153,6 +1167,12 @@ static char operationMeasureVpp(void) {
     char result;
 
     if (openSerial() != 0) {
+        return -1;
+    }
+    // Do not depend on GAL setup to discover variable VPP capability.
+    if (!varVppExists) {
+        fprintf(stderr, "Error: variable VPP board not detected; measurement unavailable.\n");
+        closeSerial();
         return -1;
     }
 
@@ -1672,6 +1692,7 @@ static int processExerciser(void) {
 
 int main(int argc, char** argv) {
     char result = 0;
+    int operationAttempted = 0;
     int i;
 
     result = checkArgs(argc, argv);
@@ -1679,42 +1700,59 @@ int main(int argc, char** argv) {
         return result;
     }
     if (verbose) {
-        printf("Afterburner " VERSION " \n");
-        printf("gal=%d \n", gal);
+        printf("Afterburner CLI " VERSION "\n");
+        printf("gal=%d\n", gal);
     }
 
     // process JTAG operations
     if (gal != 0 && galinfo[gal].id0 == JTAG_ID && galinfo[gal].id1 == JTAG_ID) {
+        operationAttempted = 1;
         result = processJtag();
         goto finish;
     }
 
-    result = operationSetGalCheck();
-
-    if (gal != UNKNOWN && 0 == result) {
-        result = operationSetGalType(gal);
+    // GAL configuration is only needed for operations involving a device.
+    // Standalone VPP test/calibration/measurement (s, b, m) do not need f/F.
+    // Keep the initialization for mixed modes (e.g. im) and for an explicit
+    // GAL type: a type-specific VPP measurement uses the M command.
+    const int needsGalSetup =
+        gal != UNKNOWN || opErase || opWrite || opRead || opVerify ||
+        opInfo || opWritePes || opSecureGal || opExercise;
+    if (needsGalSetup) {
+        result = operationSetGalCheck();
+        if (gal != UNKNOWN && result == 0) {
+            result = operationSetGalType(gal);
+        }
     }
 
     if (opErase && (0 == result || noGalCheck)) {
+        operationAttempted = 1;
         result = operationEraseGal();
     }
 
     if (0 == result || noGalCheck) {
         if (opWrite) {
             // writing fuses and optionally verification
+            operationAttempted = 1;
             result = operationWriteOrVerify(1);
         } else if (opInfo) {
+            operationAttempted = 1;
             result = operationReadInfo();
         } else if (opRead) {
+            operationAttempted = 1;
             result = operationReadFuses();
         } else if (opVerify) {
             // verification without writing
+            operationAttempted = 1;
             result = operationWriteOrVerify(0);
         } else if (opTestVPP) {
+            operationAttempted = 1;
             result = operationTestVpp();
         } else if (opWritePes) {
+            operationAttempted = 1;
             result = operationWritePes();
         } else if (opExercise) {
+            operationAttempted = 1;
             result = processExerciser();
         }
         if (0 == result && (opWrite || opVerify)) {
@@ -1722,18 +1760,25 @@ int main(int argc, char** argv) {
                 operationSecureGal();
             }
         }
-        //variable VPP functions (for new board designs)
-        if (varVppExists) {
-            if (0 == result && opCalibrateVPP) {
-                result = operationCalibrateVpp();
-            }
-            if (0 == result && opMeasureVPP) {
-                result = operationMeasureVpp();
-            }
+        // These functions open the serial port and detect varVpp themselves.
+        // Checking varVppExists here would silently skip a standalone 'm' or
+        // 'b' because the board has not yet been probed.
+        if (0 == result && opCalibrateVPP) {
+            operationAttempted = 1;
+            result = operationCalibrateVpp();
+        }
+        if (0 == result && opMeasureVPP) {
+            operationAttempted = 1;
+            result = operationMeasureVpp();
         }
     }
 
 finish:
+    // Never report success if an operation was requested but none ran.
+    if (result == 0 && !operationAttempted) {
+        fprintf(stderr, "Error: no requested operation was executed.\n");
+        result = -1;
+    }
     if (verbose) {
         printf("result=%i\n", (char)result);
     }
