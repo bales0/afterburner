@@ -5,8 +5,11 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
+    <EnableAvaloniaXamlCompilation>true</EnableAvaloniaXamlCompilation>
+    <AvaloniaXamlReportImportance>high</AvaloniaXamlReportImportance>
     <AssemblyName>AfterburnerStudio</AssemblyName>
     <RootNamespace>AfterburnerStudio</RootNamespace>
+    <ApplicationIcon>Assets/AppIcon.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="11.3.22" />
@@ -16,7 +19,24 @@
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Override default root AXAML items with an explicit, nonduplicated list. -->
+    <AvaloniaXaml Remove="App.axaml;MainWindow.axaml" />
+    <AvaloniaXaml Include="App.axaml;MainWindow.axaml" />
+    <AvaloniaResource Include="Assets/AppIcon.ico" />
     <None Update="Assets/Diagrams/*.svg" CopyToOutputDirectory="PreserveNewest" /><None Update="xsvf/*.xsvf" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <!-- XamlX patches the intermediate assembly after Roslyn compilation. Ensure
+       it has executed before MSBuild copies the DLL into bin/Debug/net10.0. -->
+  <Target Name="VerifyAndCompileAfterburnerXaml"
+          BeforeTargets="CopyFilesToOutputDirectory"
+          DependsOnTargets="CompileAvaloniaXaml"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <Error Condition="!Exists('App.axaml') Or !Exists('MainWindow.axaml')"
+           Text="Missing App.axaml or MainWindow.axaml. Both must be present in AfterburnerStudio." />
+    <Error Condition="'@(AvaloniaXaml->Count())' == '0'"
+           Text="No AvaloniaXaml items! Check that AXAML files are included." />
+    <Message Importance="high"
+             Text="Afterburner AXAML: @(AvaloniaXaml) / compilation enabled: $(EnableAvaloniaXamlCompilation)" />
+  </Target>
 </Project>
 

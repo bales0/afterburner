@@ -25,17 +25,15 @@ public partial class MainWindow : Window
         ChipBox.ItemsSource = ChipProfile.All.Select(x => x.Name).ToList();
         ChipBox.SelectedIndex = 10; // ATF16V8B
         BoardBox.SelectedIndex = 2;
-        SetChip(Current);
-        RefreshPorts();
-        // XAML events can fire during construction. Defer the first complete
-        // state refresh until Avalonia has attached the visual tree.
         Loaded += OnWindowLoaded;
         Log("Afterburner Studio. Serial connection: 57600 8N1.");
     }
 
     private void OnWindowLoaded(object? sender, RoutedEventArgs e)
     {
-        Loaded -= OnWindowLoaded;
+        if (_ready) return;
+        SetChip(Current);
+        RefreshPorts();
         _ready = true;
         UpdateOperationState();
     }
@@ -44,10 +42,8 @@ public partial class MainWindow : Window
     {
         Diagram.Chip = chip;
         if (NoChipCheck is not null) NoChipCheck.IsChecked = false;
-        AdapterCheck.IsVisible = chip.NeedsAdapter;
-        AdapterCheck.IsChecked = false;
         JtagErasePanel.IsVisible = chip.IsJtag;
-        ConditionButton.IsEnabled = chip.Conditioning;
+        ConditionButton.IsEnabled = !chip.IsJtag;
         ChipSummary.Text = $"{chip.Name}  •  " + (chip.IsJtag ? "JTAG/XSVF" : $"{chip.FuseCount} fuse bits") +
             $"\nBoard: {chip.MinimumBoard}\n{chip.Note}";
         AdapterNotice.Text = chip.Adapter is null
@@ -64,52 +60,62 @@ public partial class MainWindow : Window
             SetChip(Current);
     }
 
+    private string SelectedPort => PortList?.SelectedItem as string ?? "";
+
     private void RefreshPorts()
     {
         try
         {
-            string selected = PortBox.Text?.Trim() ?? "";
-            string[] ports = SerialPort.GetPortNames().OrderBy(x => x.Length).ThenBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
+            string previous = SelectedPort;
+            string[] ports = SerialPort.GetPortNames()
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
             PortList.ItemsSource = ports;
-            PortList.SelectedItem = ports.FirstOrDefault(p => p.Equals(selected, StringComparison.OrdinalIgnoreCase));
-            PortBox.Text = selected;
-            if (selected.Length == 0 && ports.Length == 1) PortList.SelectedItem = ports[0];
-            Log("Detected ports: " + (ports.Length > 0 ? string.Join(", ", ports) : "none (manual entry available)"));
+            // Never retain a stale port that disappeared from the operating system.
+            PortList.SelectedItem = ports.FirstOrDefault(p => p.Equals(previous, StringComparison.OrdinalIgnoreCase))
+                ?? ports.FirstOrDefault();
+            SetExternalRamStatus("not queried (diagnostics only)");
+            Log("Detected serial ports: " + (ports.Length > 0 ? string.Join(", ", ports) : "none"));
         }
-        catch (Exception ex) { Log("Ports: " + ex.Message + " — enter the port manually."); }
+        catch (Exception ex)
+        {
+            PortList.ItemsSource = Array.Empty<string>();
+            PortList.SelectedItem = null;
+            SetExternalRamStatus("not queried (diagnostics only)");
+            Log("Port scan failed: " + ex.Message);
+        }
         UpdateOperationState();
     }
     private void OnRefreshPorts(object? sender, RoutedEventArgs e) => RefreshPorts();
 
     private void OnPortSelected(object? sender, SelectionChangedEventArgs e)
     {
-        if (PortList.SelectedItem is string port) PortBox.Text = port;
+        if (!_ready) return;
+        SetExternalRamStatus("not queried (diagnostics only)");
         UpdateOperationState();
-    }
-    // The port TextChanged event can arrive while the view is being initialized,
-    // or when the code-behind was built against a different MainWindow.axaml.
-    // Missing optional diagnostics UI must never terminate the application.
-    private void SetExternalRamStatus(string status)
-    {
-        if (ExternalRamStatus is TextBlock label)
-            label.Text = "External SRAM: " + status;
     }
 
-    private void OnInputChanged(object? sender, RoutedEventArgs e)
+    private void SetExternalRamStatus(string status)
     {
-        if (_ready && ReferenceEquals(sender, PortBox))
+        // Hardware information is shown only after the programmer has responded.
+        // SRAM is included in the connection summary, not as a separate empty badge.
+        if (HardwareSummary is null) return;
+        if (status.Contains("not queried", StringComparison.OrdinalIgnoreCase))
         {
-            SetExternalRamStatus("not queried (diagnostics only)");
-            if (PortList.SelectedItem is string listed &&
-                !listed.Equals(PortBox.Text?.Trim(), StringComparison.OrdinalIgnoreCase)) PortList.SelectedItem = null;
+            HardwareSummary.Text = "";
+            HardwareSummary.IsVisible = false;
         }
-        UpdateOperationState();
+        else if (!string.IsNullOrWhiteSpace(HardwareSummary.Text))
+        {
+            // Do not duplicate the SRAM portion already supplied by ConnectionSummary.
+            HardwareSummary.IsVisible = true;
+        }
     }
+
+    private void OnInputChanged(object? sender, RoutedEventArgs e) => UpdateOperationState();
     private void OnSetupChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (!_ready) return;
         NoChipCheck.IsChecked = false;
-        AdapterCheck.IsChecked = false;
         UpdateOperationState();
     }
     private void OnSourceChanged(object? sender, TextChangedEventArgs e)
@@ -121,8 +127,7 @@ public partial class MainWindow : Window
 
     private string? SetupIssue()
     {
-        if (string.IsNullOrWhiteSpace(PortBox.Text)) return "Select a serial port or enter it manually.";
-        if (Current.NeedsAdapter && AdapterCheck.IsChecked != true) return "Confirm the adapter / JTAG wiring check.";
+        if (string.IsNullOrWhiteSpace(SelectedPort)) return "Select a detected serial port.";
         if (Current.MinimumBoard == "3.1+" && BoardBox.SelectedIndex == 0) return "This device requires board 3.1+ or a verified modification.";
         if (Current.MinimumBoard == "3.2+" && BoardBox.SelectedIndex < 2) return "This device requires board 3.2+ or a verified modification.";
         return null;
@@ -131,15 +136,12 @@ public partial class MainWindow : Window
     private void UpdateOperationState()
     {
         if (!_ready) return;
+        if (ProgrammingInputs is null || ConnectionInputs is null || CalibrationInputs is null) return;
         bool idle = !_interactionBusy && _running is null;
         ProgrammingInputs.IsEnabled = idle;
-        // On some Avalonia builds the generated field can still be null
-        // during startup. Resolve the named XAML element from the tree too;
-        // never terminate the application because this panel is unavailable.
-        var connectionInputs = ConnectionInputs ?? this.FindControl<Border>("ConnectionInputs");
-        if (connectionInputs is not null) connectionInputs.IsEnabled = idle;
+        ConnectionInputs.IsEnabled = idle;
         CalibrationInputs.IsEnabled = idle;
-        bool vppReady = idle && NoChipCheck.IsChecked == true && !string.IsNullOrWhiteSpace(PortBox.Text);
+        bool vppReady = idle && NoChipCheck.IsChecked == true && !string.IsNullOrWhiteSpace(SelectedPort);
         VppSetButton.IsEnabled = VppCalibrateButton.IsEnabled = VppMeasureButton.IsEnabled = vppReady;
         bool setup = SetupIssue() is null;
         var report = JedecValidator.Validate(JedPath.Text ?? "", Current);
@@ -153,10 +155,18 @@ public partial class MainWindow : Window
         EraseButton.IsEnabled = idle && setup && eraseIssue is null;
         VerifyButton.IsEnabled = idle && setup && report.Valid && !Current.IsJtag;
         WriteButton.IsEnabled = idle && setup && report.Valid && eraseIssue is null;
-        ConditionButton.IsEnabled = idle && setup && Current.Conditioning;
+        ConditionButton.IsEnabled = idle && setup && !Current.IsJtag;
         WriteButton.Content = Current.IsJtag ? "ERASE AND WRITE XSVF" : "WRITE AND VERIFY";
-        WriteReadiness.Text = !idle ? "An operation is in progress…" : SetupIssue() ??
-            (!report.Valid ? "Select a valid file: " + report.Message : eraseIssue ?? "Ready. Insert/remove the device with socket power OFF; switch it ON for programming.");
+        string fileReadiness;
+        if (string.IsNullOrWhiteSpace(JedPath.Text))
+            fileReadiness = Current.IsJtag
+                ? "Ready for identify, erase or readback setup. Select a design XSVF file to enable erase/write operations."
+                : "Ready for identify or read. Select a JEDEC file to enable write and verify.";
+        else if (!report.Valid)
+            fileReadiness = "Select a valid file: " + report.Message;
+        else
+            fileReadiness = eraseIssue ?? "Ready. Switch socket power OFF only for chip insertion/removal; use the required power setting (normally ON) for programming.";
+        WriteReadiness.Text = !idle ? "An operation is in progress…" : SetupIssue() ?? fileReadiness;
     }
 
     private async Task WithInteractionAsync(Func<Task> action)
@@ -215,19 +225,21 @@ public partial class MainWindow : Window
     private void SetStatus(string text)
     {
         if (!Dispatcher.UIThread.CheckAccess()) { Dispatcher.UIThread.Post(() => SetStatus(text)); return; }
-        StatusText.Text = text;
+        // Status is shown inside the Operation result panel on the active page.
+        StatusText.Text = text.StartsWith("Operation failed:", StringComparison.OrdinalIgnoreCase)
+            || text.StartsWith("Error", StringComparison.OrdinalIgnoreCase)
+            ? "See details below." : text;
         bool error = text.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ||
             text.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
             text.Contains("blocked", StringComparison.OrdinalIgnoreCase) ||
             text.Contains("refused", StringComparison.OrdinalIgnoreCase);
-        OperationError.IsVisible = error;
-        OperationError.Text = error ? text : "";
+        // Prevent the same error being printed for a third time in the top status strip.
         // Status belongs to the active UI, not to a hidden diagnostic tab.
         // Serial diagnostics are recorded separately by NativeAfterburner.
         if (error && _running is null)
         {
-            OperationHeadline.Text = "Action required";
-            ProgressCaption.Text = "Check input or device";
+            OperationHeadline.Text = "Failed";
+            ProgressCaption.Text = "See details below";
             if (Tabs?.SelectedIndex == 0 && ProgrammingResultTitle is not null)
             {
                 ProgrammingResultTitle.Text = "Action required";
@@ -250,15 +262,14 @@ public partial class MainWindow : Window
     {
         OperationHeadline.Text = OperationName(mode);
         ProgressCaption.Text = "Connecting…";
-        HardwareSummary.Text = "Connecting to programmer…";
+        HardwareSummary.IsVisible = false;
+        HardwareSummary.Text = "";
         if (mode is not ("m" or "b" or "s"))
         {
             ProgrammingResultTitle.Text = OperationName(mode) + " — in progress";
             ProgrammingResultDetails.Text = "Connecting to the programmer…";
         }
         StatusText.Text = "Opening the programmer connection…";
-        OperationError.IsVisible = false;
-        OperationError.Text = "";
         BusyBar.Value = 0;
         BusyBar.IsIndeterminate = true; // unknown duration, never invent completion percentage
         if (mode is "m" or "b" or "s")
@@ -302,6 +313,7 @@ public partial class MainWindow : Window
         switch (progress.Kind)
         {
             case ProgrammerProgressKind.Connection:
+                HardwareSummary.IsVisible = !string.IsNullOrWhiteSpace(progress.Message);
                 HardwareSummary.Text = progress.Message;
                 break;
             case ProgrammerProgressKind.Detail:
@@ -315,7 +327,7 @@ public partial class MainWindow : Window
                 break;
             case ProgrammerProgressKind.Stage:
                 StatusText.Text = progress.Message;
-                ProgressCaption.Text = "Working…";
+                ProgressCaption.Text = "Processing on programmer…";
                 BusyBar.IsIndeterminate = true;
                 break;
             case ProgrammerProgressKind.Progress:
@@ -323,9 +335,9 @@ public partial class MainWindow : Window
                 if (progress.Total > 0)
                 {
                     int percent = Math.Clamp((int)(100L * progress.Current / progress.Total), 0, 100);
-                    ProgressCaption.Text = $"{progress.Current}/{progress.Total} ({percent}%) transferred";
+                    ProgressCaption.Text = $"Transfer to programmer: {progress.Current}/{progress.Total} ({percent}%)";
                     BusyBar.IsIndeterminate = false;
-                    // This is upload progress, not completion of the full write/verify procedure.
+                    // This reflects file-transfer progress only, not completion of the entire write/verify algorithm.
                     BusyBar.Value = Math.Min(90, percent * 0.9);
                 }
                 break;
@@ -409,13 +421,8 @@ public partial class MainWindow : Window
 
     private bool SetupOk(bool requireChip = true)
     {
-        if (string.IsNullOrWhiteSpace(PortBox.Text)) { SetStatus("Select a serial port."); return false; }
+        if (string.IsNullOrWhiteSpace(SelectedPort)) { SetStatus("Select a detected serial port."); return false; }
         if (!requireChip) return true;
-        if (Current.NeedsAdapter && AdapterCheck.IsChecked != true)
-        {
-            SetStatus("Check the adapter wiring and orientation against its PCB documentation before continuing.");
-            return false;
-        }
         if (Current.MinimumBoard == "3.1+" && BoardBox.SelectedIndex == 0)
         {
             SetStatus("This GAL requires board 3.1+ or a verified modification of an older board.");
@@ -480,12 +487,18 @@ public partial class MainWindow : Window
             // subsequent lines. Progress<T> posts asynchronously and can leave the
             // VPP bars unchanged until the entire operation has completed.
             var liveUi = new ImmediateUiProgress(ShowProgress);
-            var result = await _programmer.RunAsync(PortBox.Text ?? "", Current, mode, bits, xsvf, erase,
+            var result = await _programmer.RunAsync(SelectedPort, Current, mode, bits, xsvf, erase,
                 offset ?? 0, diagnosticLog, timeout, _running.Token, liveUi);
-            SetExternalRamStatus(_programmer.ExternalRamStatus);
             // Also apply the final connection snapshot: progress callbacks may be queued
             // behind the completed task, and the GUI must never depend on log parsing.
-            HardwareSummary.Text = result.ConnectionSummary ?? "Connection to programmer not confirmed.";
+            string hwInfo = result.ConnectionSummary ?? "";
+            string sramInfo = _programmer.ExternalRamStatus;
+            if (!string.IsNullOrWhiteSpace(sramInfo) &&
+                !sramInfo.Contains("not queried", StringComparison.OrdinalIgnoreCase) &&
+                !hwInfo.Contains("SRAM", StringComparison.OrdinalIgnoreCase))
+                hwInfo = string.IsNullOrWhiteSpace(hwInfo) ? "SRAM: " + sramInfo : hwInfo + "  |  SRAM: " + sramInfo;
+            HardwareSummary.Text = hwInfo;
+            HardwareSummary.IsVisible = !string.IsNullOrWhiteSpace(hwInfo);
             // Apply the final structured snapshot as well; no last-point race with async UI events.
             if (result.VoltageReadings is { } readings)
             {
@@ -498,9 +511,9 @@ public partial class MainWindow : Window
             if (result.Succeeded)
             {
                 BusyBar.Value = 100;
-                OperationHeadline.Text = OperationName(mode) + " — complete";
-                ProgressCaption.Text = "Completed";
-                SetStatus(mode == "i" ? "Device identified successfully." : "The programmer confirmed successful completion.");
+                OperationHeadline.Text = "Completed";
+                ProgressCaption.Text = "Finished";
+                SetStatus("Operation completed.");
                 if (mode == "m")
                 {
                     VppCurrentStep.Text = "All six voltage measurements completed.";
@@ -519,21 +532,32 @@ public partial class MainWindow : Window
             {
                 bool chipNotDetected = mode == "i" &&
                     (result.Error?.Contains("Chip not detected", StringComparison.OrdinalIgnoreCase) == true);
-                OperationHeadline.Text = chipNotDetected ? "Chip not detected" : OperationName(mode) + " — failed";
-                ProgressCaption.Text = chipNotDetected ? "Check socket, power and contacts" : "Failed";
+                BusyBar.IsIndeterminate = false;
+                BusyBar.Value = 0;
+                OperationHeadline.Text = "Failed";
+                ProgressCaption.Text = "See details below";
                 SetStatus("Operation failed: " + (result.Error ?? "Unknown error"));
                 if (mode is "m" or "b" or "s") CalibrationResult.Text = "Measurement/calibration failed: " + (result.Error ?? "Unknown error");
                 else
                 {
                     ProgrammingResultTitle.Text = chipNotDetected ? "Chip not detected" : OperationName(mode) + " — failed";
-                    ProgrammingResultDetails.Text = string.Join(Environment.NewLine,
-                        (result.Details ?? Array.Empty<string>()).Append("Error: " + (result.Error ?? "Unknown error")));
+                    // Show the actionable reason once, without duplicating the detail list.
+                    var reason = result.Error ?? "Unknown error";
+                    var details = (result.Details ?? Array.Empty<string>())
+                        .Where(d => !string.IsNullOrWhiteSpace(d) &&
+                            !d.Contains(reason, StringComparison.OrdinalIgnoreCase) &&
+                            !reason.Contains(d, StringComparison.OrdinalIgnoreCase))
+                        .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                    ProgrammingResultDetails.Text = details.Length == 0
+                        ? reason : reason + Environment.NewLine + string.Join(Environment.NewLine, details);
                 }
             }
             return result;
         }
         catch (OperationCanceledException)
         {
+            BusyBar.IsIndeterminate = false;
+            BusyBar.Value = 0;
             OperationHeadline.Text = "Operation cancelled";
             ProgressCaption.Text = "Cancelled";
             SetStatus("Operation cancelled. Socket voltage may still be active; check the programmer.");
@@ -543,6 +567,8 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            BusyBar.IsIndeterminate = false;
+            BusyBar.Value = 0;
             OperationHeadline.Text = "Operation failed";
             ProgressCaption.Text = "Failed";
             SetStatus("Error: " + ex.Message);
@@ -647,8 +673,8 @@ public partial class MainWindow : Window
     }
     private async Task ConditionAsync()
     {
-        if (!Current.Conditioning || !SetupOk()) return;
-        if (!await ConfirmAsync("Condition new ATF", $"This procedure destroys the contents of {Current.Name}.\n\n1. Write an all-zero fusemap twice.\n2. Erase the device.\n\nUse only for supported new ATF devices, following manufacturer guidance.")) return;
+        if (Current.IsJtag || !SetupOk()) return;
+        if (!await ConfirmAsync("Condition device", $"This optional, destructive procedure will overwrite and erase {Current.Name}.\n\n1. Write an all-zero fusemap twice.\n2. Erase the device.\n\nThis is a JEDEC programming sequence, not a non-destructive test. It is primarily intended for compatible ATF GAL devices; for other devices use only when their programming specifications permit it. It cannot guarantee recovery of a defective device.")) return;
         string path = Path.Combine(Path.GetTempPath(), "afterburner-conditioning-" + Guid.NewGuid().ToString("N") + ".jed");
         try
         {
@@ -657,11 +683,21 @@ public partial class MainWindow : Window
             {
                 SetStatus($"Conditioning: write {pass}/2");
                 var outcome = await ExecuteAsync("w", TimeSpan.FromSeconds(50), path);
-                if (outcome?.Succeeded != true) { SetStatus("Conditioning stopped: write failed."); return; }
+                if (outcome?.Succeeded != true)
+                {
+                    // ExecuteAsync already displays the actual programmer error. Do not replace it.
+                    // A cancellation also returns null; preserve its existing result text.
+                    return;
+                }
             }
             SetStatus("Conditioning: final erase");
             var erased = await ExecuteAsync("e", TimeSpan.FromSeconds(18));
-            if (erased?.Succeeded == true) SetStatus("Conditioning complete. You can now write your JEDEC file.");
+            if (erased?.Succeeded == true)
+            {
+                SetStatus("Conditioning complete. The device can now be programmed.");
+                ProgrammingResultTitle.Text = "Conditioning complete";
+                ProgrammingResultDetails.Text = $"{Current.Name}: two writes and final erase completed without a reported error. This is not an independent verification of the chip contents.";
+            }
         }
         finally { try { File.Delete(path); } catch { } }
     }
