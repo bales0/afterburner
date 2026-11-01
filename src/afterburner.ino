@@ -492,6 +492,19 @@ static void setGalDefaults(void);
 #endif
 
 
+// Optional chip families must be rejected, not silently processed using a
+// generic read/write path when the smaller 32U4 build excludes their algorithms.
+static bool isGalTypeEnabledInBuild(GALTYPE type) {
+    if (type <= UNKNOWN || type >= LAST_GAL_TYPE) return false;
+#if !CFG_USE_GAL600X
+    if (type == GAL6001 || type == GAL6002) return false;
+#endif
+#if !CFG_USE_PEEL
+    if (type == PEEL18CV8) return false;
+#endif
+    return true;
+}
+
 // print some help on the serial console
 void printHelp(char full) {
   Serial.println(F("AFTerburner v." VERSION));
@@ -1032,6 +1045,13 @@ void parseUploadLine() {
       const int16_t type = (int16_t)line[3] - '0';
       if (!valid || type <= 0 || type >= LAST_GAL_TYPE || uploadDataReceived) {
         rejectUploadLine();
+        break;
+      }
+      if (!isGalTypeEnabledInBuild((GALTYPE)type)) {
+        uploadError = 1;
+        uploadChecksumOk = 0;
+        mapUploaded = 0;
+        Serial.println(F("ER chip type unavailable in this firmware build"));
         break;
       }
       gal = (GALTYPE)type;
@@ -2134,11 +2154,13 @@ static void readOrVerifyGal(char verify)
         i = readOrverifyGalFuseMap(cfgArray, 0, 0, verify);
         break;
 
+#if CFG_USE_GAL600X
     case GAL6001:
     case GAL6002:
         cfgArray = (gal == GAL6001) ? (unsigned char*) cfg6001 : (unsigned char*) cfg6002;
         i = readOrVerifyGalFuseMap600(cfgArray, verify);
         break;
+#endif /* CFG_USE_GAL600X */
         
     case GAL22V10:
     case ATF22V10B:
@@ -2883,7 +2905,10 @@ static void testVoltage(int seconds) {
 
 // returns 1 if type check if OK, 0 if gal type does not match the type read from PES
 static char doTypeCheck(void) {
-  
+  if (!isGalTypeEnabledInBuild(gal)) {
+    Serial.println(F("ER chip type unavailable in this firmware build"));
+    return 0;
+  }
   // Never apply high voltage if the variable-VPP board has no EEPROM map.
   if (varVppExists && !varVppCalibrationOk) {
     Serial.println(F("ER VPP calibration missing"));
@@ -3036,7 +3061,9 @@ void loop() {
       // read and print the PES
       case COMMAND_READ_PES : {
         char type;
-        if (varVppExists && !varVppCalibrationOk) {
+        if (!isGalTypeEnabledInBuild(gal)) {
+            Serial.println(F("ER chip type unavailable in this firmware build"));
+        } else if (varVppExists && !varVppCalibrationOk) {
             Serial.println(F("ER VPP calibration missing"));
         } else if (gal == PEEL18CV8) {
             printUnsupportedError();
@@ -3050,7 +3077,9 @@ void loop() {
 
       case COMMAND_WRITE_PES : {
         char type;
-        if (varVppExists && !varVppCalibrationOk) {
+        if (!isGalTypeEnabledInBuild(gal)) {
+            Serial.println(F("ER chip type unavailable in this firmware build"));
+        } else if (varVppExists && !varVppCalibrationOk) {
             Serial.println(F("ER VPP calibration missing"));
         } else if (gal == PEEL18CV8) {
             printUnsupportedError();
@@ -3127,6 +3156,10 @@ void loop() {
       case COMMAND_SET_GAL_TYPE : {
         char type = line[1] - '0';
         if (type >= 1 && type < LAST_GAL_TYPE) {
+          if (!isGalTypeEnabledInBuild((GALTYPE)type)) {
+            Serial.println(F("ER chip type unavailable in this firmware build"));
+            break;
+          }
           // ensure PEEL IC operations run on a new type of Aftburner PCB with a shift register IC
           if ((PEEL18CV8 == (GALTYPE) type) && (!varVppExists)) {
             printUnsupportedError();

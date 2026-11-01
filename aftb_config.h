@@ -1,28 +1,35 @@
 #pragma once
+// Board-dependent feature defaults. -D overrides are allowed when explicitly
+// validating a custom board/build. Firmware programming protocol stays v0.6.3.
 
-// The configuration bellow allows to reduce Afterburner's MCU code size
-// if needed, to fit to Arduino boards with reduced flash size.
-
-// Currently, Arduinos based on Atmega32u4 do not fit all supported PLD chips becuase
-// its bootloader and serial port code occupies extra 5 kbytes of flash space compared to UNO R3.
-
-
-// Supports GAL6001 and GAL6002
-#define CFG_USE_GAL600X 1
-
-// Supports ATF1502 and AFT1504 - JTAG based
-#define CFG_USE_AFT150X 1
-
-// Supports PEEL16CV8
-#define CFG_USE_PEEL 1
-
-// Supports Exerciser adapter
-#define CFG_USE_EXERCISER 1
-
-// BOARD presets:  it's possible to chose a different combination of supported PLD chips
-
-// =========== Atmega32u4  ==================
-#if defined(ARDUINO_AVR_LEONARDO) || defined(ARDUINO_AVR_YUN) || defined(ARDUINO_AVR_MICRO)
-#undef CFG_USE_EXERCISER
+#if defined(__AVR_ATmega32U4__) || defined(ARDUINO_AVR_LEONARDO) || \
+    defined(ARDUINO_AVR_MICRO) || defined(ARDUINO_AVR_YUN)
+  // The 32U4 has only ~28 KiB usable flash and 2.5 KiB RAM. Default to
+  // core GAL/PEEL functionality; the JTAG player/exerciser are too large to
+  // presume safe without real board-specific size tests.
+  #ifndef CFG_USE_GAL600X
+    #define CFG_USE_GAL600X 0
+  #endif
+  #ifndef CFG_USE_AFT150X
+    #define CFG_USE_AFT150X 0
+  #endif
+  #ifndef CFG_USE_PEEL
+    #define CFG_USE_PEEL 1
+  #endif
+  #ifndef CFG_USE_EXERCISER
+    #define CFG_USE_EXERCISER 0
+  #endif
+#else
+  #ifndef CFG_USE_GAL600X
+    #define CFG_USE_GAL600X 1
+  #endif
+  #ifndef CFG_USE_AFT150X
+    #define CFG_USE_AFT150X 1
+  #endif
+  #ifndef CFG_USE_PEEL
+    #define CFG_USE_PEEL 1
+  #endif
+  #ifndef CFG_USE_EXERCISER
+    #define CFG_USE_EXERCISER 1
+  #endif
 #endif
-

@@ -16,8 +16,7 @@
 
 #if CONFIG_IDF_TARGET_ESP32S2 == 1
 // ESP32-S2
-#include "driver/adc.h"
-#define ADC_PIN ADC2_CHANNEL_3
+// Use Arduino ADC API; no dependency on legacy ESP-IDF ADC2 driver.
 #define EEPROM_BEGIN() EEPROM.begin(128)
 #define EEPROM_UPDATE(A,V) if ((V) != EEPROM.read((A))) EEPROM.write((A),(V))
 #define EEPROM_END() EEPROM.end()
@@ -354,10 +353,14 @@ static void varVppStoreWiperCalib() {
 #if CONFIG_IDF_TARGET_ESP32S2 == 1
 static void analogReference(uint8_t ref) {
   analogReadResolution(10);
-  adc2_config_channel_atten(ADC_PIN, ADC_ATTEN_DB_11); // AREF 2.5V
+  (void)ref; // Analog reference is controlled by the Arduino ESP32 core.
 }
 #endif
 
+
+#ifndef AFTB_VPP_ACTIVE_9V_AT_STARTUP
+#define AFTB_VPP_ACTIVE_9V_AT_STARTUP 0
+#endif
 
 //return 1 on success (variable VPP functionality present), 0 on failure (VPP not detected on board)
 static int8_t varVppInit(void) {
@@ -397,6 +400,7 @@ static int8_t varVppCheckCalibration(void) {
         }
         previous = tap;
     }
+#if AFTB_VPP_ACTIVE_9V_AT_STARTUP
     varVppSet(VPP_9V0);
     delay(250); // let the voltage divider and boost converter settle
     const int16_t first = varVppMeasureVpp(0);
@@ -414,6 +418,10 @@ static int8_t varVppCheckCalibration(void) {
         return FAIL;
     }
     Serial.println(F("I: VPP 9V startup measurement OK"));
+#else
+    // No 9V is applied on boot; EEPROM table validity only.
+    Serial.println(F("I: VPP calibration table valid (voltage not tested at startup)"));
+#endif
     return OK;
 }
 
