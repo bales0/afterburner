@@ -14,12 +14,16 @@ if not exe:
 def run(*args):
     return subprocess.run([exe, *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=8)
 
-r = run('i', '-v', 'm')
-assert r.returncode != 0 and 'multiple operation arguments' in r.stdout, r.stdout
-r = run('m', '-v', '-d', '/definitely/not/a/serial/device')
-assert r.returncode != 0 and 'failed to open serial' in r.stdout, r.stdout
-r = run('b', '-v', '-d', '/definitely/not/a/serial/device')
-assert r.returncode != 0, r.stdout
+# Multiple operation arguments are supported; incompatible VPP/write modes are not.
+r = run('w', '-v', 'm', '-t', 'ATF16V8B')
+assert r.returncode != 0 and 'VPP functions can not be' in r.stdout, r.stdout
+# Identification does not enter the interactive VPP consent path.
+r = run('i', '-v', '-t', 'ATF16V8B', '-d', '/definitely/not/a/serial/device')
+assert r.returncode != 0 and 'unable to open serial port' in r.stdout, r.stdout
+for action in ('m', 'b'):
+    r = run(action, '-v', '-d', '/definitely/not/a/serial/device')
+    assert r.returncode == 2 and 'requires interactive confirmation' in r.stdout, r.stdout
+    assert 'opening serial' not in r.stdout and 'sending' not in r.stdout, r.stdout
 
 source = pathlib.Path(__file__).resolve().parents[1] / 'src_pc' / 'afterburner.c'
 s = source.read_text()

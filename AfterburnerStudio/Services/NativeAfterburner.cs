@@ -92,8 +92,8 @@ public sealed class NativeAfterburner
             Emit(ProgrammerProgressKind.Stage, "Connected to programmer on " + port + ".");
             if (_varVpp && !_calibrationVerified && action is not ("s" or "b" or "m"))
                 throw new InvalidOperationException(_calibrationMissing
-                    ? "Variable VPP failed its startup voltage measurement. Verify the hardware and recalibrate with an empty socket."
-                    : "Firmware has not confirmed a measured VPP startup check. Update the firmware before programming.");
+                    ? "Variable VPP calibration is missing or invalid. Verify the hardware and recalibrate with an empty socket."
+                    : "Firmware has not confirmed valid VPP calibration data. Update the firmware before programming.");
             if (action is "s" or "b" or "m")
             {
                 RunCalibration(action, offset);
@@ -497,6 +497,7 @@ public sealed class NativeAfterburner
             // is not part of the serial wire protocol and must never be sent here.
             case "s": Command("t", seconds: 29); break;
             case "m":
+                _lastAnnouncedVppStep = 1; // the initial step is announced before its live header arrives
                 Emit(ProgrammerProgressKind.VoltageStep,
                     "Measuring 4.2–5.0 V — step 1/6…", 1, 6);
                 Command("m", seconds: 43);
@@ -576,6 +577,11 @@ public sealed class NativeAfterburner
             string message = line.ToString().Trim();
             line.Clear();
             if (message == "RXSVF") { ready = true; Log("JTAG is ready for XSVF data."); }
+            else if (message.StartsWith("ER", StringComparison.Ordinal) ||
+                     message.StartsWith("Error:", StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Firmware rejected JTAG command: " + message);
+            else if (message == ">")
+                throw new IOException("JTAG ended without a player result. Check that this firmware supports JTAG.");
             else if (message.StartsWith("Q", StringComparison.Ordinal))
             {
                 if (XsvfSucceeded(message))

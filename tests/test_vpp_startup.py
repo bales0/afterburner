@@ -16,7 +16,9 @@ while depth:
     if source[end] == '{': depth += 1
     if source[end] == '}': depth -= 1
     end += 1
-function = source[start:end]
+defaults_start = source.index('#ifndef AFTB_VPP_ACTIVE_9V_AT_STARTUP')
+defaults_end = source.index('#endif', defaults_start) + len('#endif')
+function = source[defaults_start:defaults_end] + '\n' + source[start:end]
 assert '#if 0' not in function
 assert 'varVppMeasureVpp(0)' in function
 assert 'varVppSet(VPP_5V0)' in function
@@ -54,17 +56,22 @@ void prepare(int a, int b) {
  reads=sets=0;first=last=0;
 }
 int main() {
+#if AFTB_VPP_ACTIVE_9V_AT_STARTUP
  prepare(900,902);assert(varVppCheckCalibration()==OK);assert(reads==2);assert(first==VPP_9V0 && last==VPP_5V0);
  prepare(930,931);assert(varVppCheckCalibration()==FAIL);assert(reads==2);assert(last==VPP_5V0);
  prepare(880,920);assert(varVppCheckCalibration()==FAIL);assert(reads==2);assert(last==VPP_5V0);
+#else
+ prepare(930,931);assert(varVppCheckCalibration()==OK);assert(reads==0 && sets==0);
+#endif
  prepare(900,900);vppWiper[2]=0;assert(varVppCheckCalibration()==FAIL);assert(reads==0);assert(last==VPP_5V0);
  prepare(900,900);vppWiper[7]=vppWiper[6]-1;assert(varVppCheckCalibration()==FAIL);assert(reads==0);assert(last==VPP_5V0);
- puts("PASS: measured VPP boot check and idle state on all exits");
+ puts(AFTB_VPP_ACTIVE_9V_AT_STARTUP ? "PASS: opt-in measured VPP boot check" : "PASS: default passive VPP boot check (no high voltage)");
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:
     cpp = Path(tmp) / 'vpp_test.cpp'
     binary = Path(tmp) / 'vpp_test'
     cpp.write_text(program)
-    subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', str(cpp), '-o', str(binary)], check=True)
-    subprocess.run([str(binary)], check=True)
+    for flags in ([], ['-DAFTB_VPP_ACTIVE_9V_AT_STARTUP=1']):
+        subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', *flags, str(cpp), '-o', str(binary)], check=True)
+        subprocess.run([str(binary)], check=True)

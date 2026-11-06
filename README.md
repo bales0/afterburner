@@ -5,9 +5,9 @@ Complete VS Code application project, based on the original DirectSerial ZIP and
 ## Changes
 
 - Removed project goals and promotional header/footer text. Operations are at the top of the right column; the file picker remains in the left column.
-- Added a serial-port list, refresh, preserved selection and a manual port field. A single detected port is selected automatically; multiple ports require a choice.
+- Added a serial-port list and refresh. The previous selection is preserved while the port remains available; otherwise the first detected port is selected. Check the selected port before starting an operation.
 - File browsing filters JEDEC or XSVF according to the selected device. Paths are editable as a fallback. Validation updates when the path or device changes.
-- Write availability follows the selected port, valid input, board revision and insertion/adapter confirmations. The interface explains why writing is blocked. Changing the device or board resets the relevant confirmations.
+- Write availability follows the selected port, valid input and board revision. Review device placement and adapter connections in the operation confirmation. VPP operations require the empty-socket or disconnected-VPP confirmation.
 - Locked input changes while a file picker, confirmation or operation is active. Exceptions from file selection, snapshots and operations are shown in the status area.
 - Fixed normal, hover, pressed and disabled button foreground/background combinations in the Fluent content template. The application uses a light theme.
 - Corrected the socket illustration: USB left, lever right, pin 1 upper right. DIP20 leaves ZIF 11–14 unused at the left. The old mirrored SVGs/previews were replaced. Adapter pin maps are not inferred; use the specific adapter schematic. See `docs/PIN_VERIFICATION.md`.
@@ -16,7 +16,7 @@ Complete VS Code application project, based on the original DirectSerial ZIP and
 
 ## Open and run
 
-Open this folder in VS Code. Install .NET 8 SDK (or a compatible newer SDK with .NET 8 targeting/runtime support) and the C# extension.
+Open this folder in VS Code. Install .NET 10 SDK and the C# extension.
 
 ```powershell
 dotnet restore AfterburnerStudio/AfterburnerStudio.csproj
@@ -30,9 +30,9 @@ This repository also contains the Arduino firmware source (`src/afterburner.ino`
 
 1. Select a serial port, device and board revision.
 2. Browse for a `.jed` or `.xsvf` file, or paste its local path.
-3. With socket power off, insert the device using the correct orientation. Confirm insertion and, when applicable, check the adapter/JTAG connections.
+3. With socket power off, insert the device using the correct orientation. Check device orientation and, when applicable, the adapter/JTAG connections.
 4. Turn socket power on. Choose **WRITE AND VERIFY**, or **ERASE AND WRITE XSVF** for JTAG. Review the device confirmation.
-5. Check the operation result in **Progress and messages** / **Log**. Turn socket power off before removing the device.
+5. Check the operation result in **Operation result** / **Diagnostic log**. Turn socket power off before removing the device.
 
 For JTAG, verification must be part of the design XSVF. An erase XSVF does not verify the design. Identification, readback and standalone verification are unavailable for the JTAG profiles.
 
@@ -45,7 +45,7 @@ dotnet run --project tests/Functional/Functional.csproj -c Release
 
 The first command checks source structure, XML, handlers, language, style guards, pin mapping and bundled files. The second compiles the application/XAML and runs C# tests for JEDEC validation, pin numbering, emulated serial operations, UI enablement, confirmation cancellation and button pointer states. UI tests use Avalonia.Headless; they do not program a real device.
 
-**Verification:** C CLI build and offline parser/sparse-array tests passed in the repair environment. A current .NET SDK and AVR toolchain were unavailable there, so Studio and the modified firmware must still be built and tested locally. See `docs/FIXES_CZ.md` and `docs/TESTING.md` for details.
+**Verification (2026-11-02):** Release Studio/AXAML build passed with no warnings or errors; 95 functional checks and 54 static source checks passed. The Windows C CLI, offline parser/sparse-map regressions and all nine firmware configurations passed their applicable checks. Physical programming and VPP measurements remain unverified; R4 and ESP32-S2 remain experimental. See `docs/TESTING.md` for commands and limits.
 
 ## Files
 

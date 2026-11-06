@@ -6,12 +6,12 @@ function Assert-Source([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
     $script:checks++
 }
-Get-ChildItem $gui -Recurse -File | Where-Object { $_.Extension -in '.axaml','.svg','.csproj' } | ForEach-Object {
-    [xml]$document = Get-Content $_.FullName -Raw
+Get-ChildItem $gui -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' -and $_.Extension -in '.axaml','.svg','.csproj' } | ForEach-Object {
+    [xml]$document = Get-Content $_.FullName -Raw -Encoding UTF8
     Assert-Source ($null -ne $document.DocumentElement) "Invalid XML: $($_.Name)"
 }
-$view = Get-Content (Join-Path $gui 'MainWindow.axaml') -Raw
-$code = Get-Content (Join-Path $gui 'MainWindow.axaml.cs') -Raw
+$view = Get-Content (Join-Path $gui 'MainWindow.axaml') -Raw -Encoding UTF8
+$code = Get-Content (Join-Path $gui 'MainWindow.axaml.cs') -Raw -Encoding UTF8
 foreach($match in [regex]::Matches($view,'(?:Click|SelectionChanged|TextChanged|IsCheckedChanged)="([A-Za-z][A-Za-z0-9_]*)"')) {
     $handler = $match.Groups[1].Value
     Assert-Source ([regex]::IsMatch($code, '\b'+$handler+'\s*\(')) "Missing handler: $handler"
@@ -19,24 +19,25 @@ foreach($match in [regex]::Matches($view,'(?:Click|SelectionChanged|TextChanged|
 [xml]$xml = $view
 $names = @($xml.SelectNodes('//*[@Name]') | ForEach-Object { $_.Name })
 Assert-Source (($names | Sort-Object -Unique).Count -eq $names.Count) 'Duplicate named controls'
-foreach($name in @('PortList','PortBox','JedPath','EraseXsvfPath','WriteButton','WriteReadiness','CancelButton')) {
+foreach($name in @('PortList','ConnectionInputs','JedPath','EraseXsvfPath','WriteButton','WriteReadiness','CancelButton')) {
     Assert-Source ($names -contains $name) "Missing control: $name"
 }
+Assert-Source ($names -notcontains 'PortBox') 'Obsolete manual port control remains'
 Assert-Source ($view.Contains('Button.mainaction:pointerover /template/ ContentPresenter#PART_ContentPresenter')) 'Missing template hover style'
 Assert-Source ($view.Contains('Button.mainaction:pressed /template/ ContentPresenter#PART_ContentPresenter')) 'Missing pressed style'
 Assert-Source ($view.Contains('Button:disabled /template/ ContentPresenter#PART_ContentPresenter')) 'Missing disabled style'
 Assert-Source (-not $view.Contains('IsReadOnly="True" Watermark="Select a JEDEC')) 'Path fallback is read-only'
 Assert-Source (-not ($view -match '\bCLI\b|multiplatform|Projekt:|normaliz')) 'Project goals remain in UI'
-$allCode = (Get-ChildItem $gui -Recurse -File | Where-Object { $_.Extension -in '.cs','.axaml' } | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+$allCode = (Get-ChildItem $gui -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' -and $_.Extension -in '.cs','.axaml' } | ForEach-Object { Get-Content $_.FullName -Raw -Encoding UTF8 }) -join "`n"
 Assert-Source (-not ($allCode -match 'Process\.Start|CliRunner|CliPath')) 'External CLI usage found'
 Assert-Source (-not ($allCode -match '[áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]|\bnebo\b')) 'Czech text remains in application source'
-$model = Get-Content (Join-Path $gui 'Models/ChipProfile.cs') -Raw
+$model = Get-Content (Join-Path $gui 'Models/ChipProfile.cs') -Raw -Encoding UTF8
 Assert-Source ([regex]::Matches($model,'new\("([A-Z0-9]+)"').Count -eq 18) 'Device catalog changed unexpectedly'
-$backend = Get-Content (Join-Path $gui 'Services/NativeAfterburner.cs') -Raw
+$backend = Get-Content (Join-Path $gui 'Services/NativeAfterburner.cs') -Raw -Encoding UTF8
 Assert-Source ($backend.Contains('"Q-0,OK"')) 'Actual firmware XSVF success response missing'
 Assert-Source ($backend.Contains('ReadPrompt(TimeSpan.FromSeconds(5)')) 'No wait for JTAG cleanup'
 Assert-Source ($code.Contains('_interactionBusy = true') -and $code.Contains('_interactionBusy = false')) 'Missing operation lock'
-$layout = Get-Content (Join-Path $gui 'Models/SocketLayout.cs') -Raw
+$layout = Get-Content (Join-Path $gui 'Models/SocketLayout.cs') -Raw -Encoding UTF8
 Assert-Source ($layout.Contains('12 - column') -and $layout.Contains('13 + column')) 'Wrong ZIF orientation'
 foreach($pins in @(20,24)) {
     $first = 12-$pins/2

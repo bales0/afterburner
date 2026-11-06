@@ -13,7 +13,8 @@ import shutil
 source = (Path(__file__).resolve().parents[1] / 'src/afterburner.ino').read_text()
 def section(start, finish):
     return source[source.index(start):source.index(finish, source.index(start))]
-functions = section('void readGarbage() {', '// Parses decimal integer number typed')
+functions = section('static bool isGalTypeEnabledInBuild(', '// print some help on the serial console')
+functions += section('void readGarbage() {', '// Parses decimal integer number typed')
 functions += section('unsigned short parse45dec(', '// Parses a line fed by the serial connection')
 functions += section('static uint8_t uploadLineLength(void)', '// *********************************************************')
 header = r'''
@@ -38,6 +39,10 @@ header = r'''
 #define COMMAND_JTAG_PLAYER 'j'
 #define COMMAND_EXERCISE 'X'
 #define COMMAND_EXERCISE_SET_PINS 'x'
+#define UNKNOWN 0
+#define GAL6001 9
+#define GAL6002 10
+#define PEEL18CV8 16
 #define LAST_GAL_TYPE 17
 using GALTYPE = int;
 struct FakeSerial {
@@ -79,6 +84,7 @@ unsigned short checkSum(unsigned short bitCount) {
     return result;
 }
 '''
+header += '#include "' + (Path(__file__).resolve().parents[1] / 'aftb_config.h').as_posix() + '"\n'
 footer = r'''
 static void require(bool p, const std::string& message) { if (!p) throw std::runtime_error(message); }
 static void drain() {
@@ -110,6 +116,13 @@ static void rejectRow(std::string row) {
     require(!mapUploaded, "malformed upload became valid after checksum/end: "+row);
 }
 int main() {
+#if !CFG_USE_GAL600X
+    reset();feed("u\r#t 9 GAL6001\r#c 0000\r#e\rw\r");
+    require(uploadError && !mapUploaded && dangerousCommands==0,
+            "disabled GAL6001 upload was accepted");
+    require(Serial.out.find("ER chip type unavailable") != std::string::npos,
+            "missing disabled-chip diagnostic");
+#endif
     reset();feed("u\r#t 1 ATF16V8B\r#f 0000 01\r#f 0032 02\r#c 0003\r#e\r");
     require(mapUploaded && !uploadError && fusemap[0]==1 && fusemap[4]==2, "valid sparse upload failed");
     reset();feed("u\r#t 1\r#e\r");
@@ -163,5 +176,6 @@ with tempfile.TemporaryDirectory() as td:
     src = Path(td)/'firmware_serial.cpp'
     exe = Path(td)/'firmware_serial_test'
     src.write_text(header+functions+footer)
-    subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-error=sign-compare','-O1',str(src),'-o',str(exe)],check=True)
-    subprocess.run([str(exe)],check=True)
+    for flags in ([], ['-D__AVR_ATmega32U4__']):
+        subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-error=sign-compare','-O1',*flags,str(src),'-o',str(exe)],check=True)
+        subprocess.run([str(exe)],check=True)

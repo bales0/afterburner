@@ -3,7 +3,6 @@
 Does not replace a .NET 10/Avalonia build or a Windows application launch.
 """
 from pathlib import Path
-import re
 import xml.etree.ElementTree as ET
 
 repo = Path(__file__).resolve().parent.parent
@@ -14,7 +13,13 @@ assert 'RequestedThemeVariant = ThemeVariant.Light' in app
 assert 'Styles.Add(new FluentTheme())' in app
 assert 'desktop.MainWindow = new MainWindow()' in app
 assert '<TargetFramework>net10.0</TargetFramework>' in project
-assert not re.search(r'<AvaloniaXaml\s+(Remove|Include)', project), 'Do not override Avalonia default XAML items'
 root = ET.fromstring(project)
 assert root.tag == 'Project'
-print('OK: App initialization does not depend on its compiled AXAML; project uses default Avalonia resources')
+# The startup repair explicitly replaces the two default root XAML items.
+# Keep exactly one copy of each input, with compilation enabled.
+items = root.findall('.//AvaloniaXaml')
+assert [item.get('Remove') for item in items if item.get('Remove')] == ['App.axaml;MainWindow.axaml']
+assert [item.get('Include') for item in items if item.get('Include')] == ['App.axaml;MainWindow.axaml']
+assert root.findtext('.//EnableAvaloniaXamlCompilation') == 'true'
+assert root.find(".//Target[@Name='VerifyAndCompileAfterburnerXaml']").get('DependsOnTargets') == 'CompileAvaloniaXaml'
+print('OK: App initialization and explicit compiled AXAML inputs are consistent')

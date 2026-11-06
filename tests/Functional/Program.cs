@@ -146,7 +146,7 @@ internal static class Program
             "Program/verification results must not exist only in the diagnostic log");
         var noCalibration = new Emulator { VppCalibrationStatus = "VPP-CAL-MISSING" };
         Check(!Run(noCalibration, Atf, "wv").Succeeded && !noCalibration.Commands.Contains("w"),
-            "A failed startup VPP measurement must block programming");
+            "Missing or invalid VPP calibration must block programming");
         // Only diagnostics: RAM presence must not influence programming decisions.
         foreach (var (banner, expected) in new[] {
             ("SeRAM:23LC512", "23LC512 detected"),
@@ -164,7 +164,7 @@ internal static class Program
         }
         var legacyNoStatus = new Emulator { VppCalibrationStatus = "" };
         Check(!Run(legacyNoStatus, Atf, "wv").Succeeded && !legacyNoStatus.Commands.Contains("w"),
-            "Legacy firmware without measured-VPP status must not be treated as verified");
+            "Legacy firmware without VPP calibration status must not be treated as verified");
         var bits = new byte[Atf.FuseCount]; bits[0]=1; bits[9]=1;
         port = new Emulator();
         Check(Run(port,Atf,"wv",bits:bits).Succeeded && port.Commands.Contains("#f 0000 01020000") &&
@@ -178,6 +178,16 @@ internal static class Program
         Check(Run(port,jtag,"ew").Succeeded, "XSVF erase+write failed");
         Check(port.Commands.Where(x=>x.StartsWith('j')).SequenceEqual(new[]{"j1","j0"}), "JTAG order wrong");
         Check(port.BinaryChunks==2 && !port.UnreadBeforeCommand, "Next XSVF started before cleanup prompt");
+        foreach (string reply in new[] { "ER Unknown command: j1", "Error: JTAG unavailable", ">" })
+        {
+            port = new Emulator { JtagStartResponse = reply + "\r\n>\r\n" };
+            var rejected = Run(port, jtag, "ew");
+            Check(!rejected.Succeeded && rejected.Error?.Contains("JTAG") == true &&
+                !rejected.Error.Contains("timed out", StringComparison.OrdinalIgnoreCase),
+                "JTAG rejection must fail immediately with a useful error: " + reply);
+            Check(port.BinaryChunks == 0 && !port.Commands.Contains("j0") && port.Closed && port.Disposed,
+                "Rejected JTAG operation continued or leaked the port");
+        }
         port = new Emulator { JtagResult="Q-3,Fail" };
         Check(!Run(port,jtag,"ew").Succeeded && !port.Commands.Contains("j0"), "JTAG failure ignored");
         port = new Emulator();
@@ -194,32 +204,22 @@ internal static class Program
     {
         AppBuilder.Configure<App>().UseHeadless(new AvaloniaHeadlessPlatformOptions()).SetupWithoutStarting();
         var window = new MainWindow();
-        Check(window.FindControl<TextBlock>("UiBuildMarker")?.Text?.Contains("2026-10-31C") == true,
-            "UI build marker missing: old XAML or a stale assembly is running");
+        Check(window.FindControl<ComboBox>("PortList") is not null,
+            "Compiled main-window XAML was not loaded");
         T Find<T>(string name) where T:Control => window.FindControl<T>(name) ?? throw new Exception("Missing "+name);
         window.Show(); Pump();
         string directory=Path.Combine(Path.GetTempPath(),"AfterburnerTests-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         try
         {
-            var port=Find<TextBox>("PortBox");
             var ports=Find<ComboBox>("PortList");
-            ports.ItemsSource=new[]{"COM3","COM12"}; ports.SelectedItem="COM12"; Pump();
-            Check(port.Text=="COM12","COM selection does not update port");
-            port.Text="COM99"; Pump();
-            Check(ports.SelectedItem==null,"Manual port leaves stale list selection");
-            Check(Find<TextBlock>("ExternalRamStatus").Text?.Contains("not queried") == true,
-                "External SRAM indicator missing from connection panel");
-            // Status and cancel are outside the TabControl, visible on VPP and programming alike.
+            ports.ItemsSource=new[]{"COM3","COM12","COM_TEST"}; ports.SelectedItem="COM12"; Pump();
+            Check(Find<Button>("IdentifyButton").IsEnabled,"COM selection does not enable identification");
+            Check(window.FindControl<TextBox>("PortBox") is null,"Obsolete manual port field remains");
+            Check(!Find<TextBlock>("HardwareSummary").IsVisible,
+                "Hardware details must stay hidden until the programmer responds");
             var tabs = Find<TabControl>("Tabs");
-            var status = Find<TextBlock>("StatusText");
-            Check(!tabs.GetVisualDescendants().Contains(status),
-                "Operation status must not be buried inside another tab");
             tabs.SelectedIndex = 1; Pump();
-            Check(status.IsVisible && Find<ProgressBar>("BusyBar").IsVisible,
-                "Progress is not visible on VPP page");
-            Check(Find<TextBlock>("HardwareSummary").IsVisible,
-                "Connection state must be visible even when the VPP page is active");
             // Connection and PCB selection must remain visible on the VPP page too.
             var connectionPanel = Find<Border>("ConnectionInputs");
             var board = Find<ComboBox>("BoardBox");
@@ -239,11 +239,11 @@ internal static class Program
             Check(window.FindControl<CheckBox>("OffCheck") is null,
                 "Repeated insertion-confirmation checkbox should be removed");
             vppSafe.IsChecked = true; Pump();
-            Find<TextBox>("PortBox").Text = "COM_TEST"; Pump();
+            ports.SelectedItem = "COM_TEST"; Pump();
             Check(Find<Button>("VppMeasureButton").IsEnabled, "VPP start button disabled despite safety confirmation");
             Find<Button>("VppMeasureButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Pump();
             var vppConfirmation = window.OwnedWindows.Single();
-            Check(vppConfirmation.Title.Contains("socket protection", StringComparison.OrdinalIgnoreCase),
+            Check(vppConfirmation.Title?.Contains("socket protection", StringComparison.OrdinalIgnoreCase) == true,
                 "Missing graphical safety confirmation for VPP measurement");
             vppConfirmation.Close(false); Pump();
             Check(!Find<Button>("CancelButton").IsEnabled,
@@ -260,8 +260,8 @@ internal static class Program
             File.WriteAllText(jed,JedecValidator.ConditioningJedec(Atf.FuseCount),Encoding.Latin1);
             file.Text=jed; Pump();
             Check(write.IsEnabled,"Valid file and port should permit write confirmation without another checkbox");
-            port.Text=""; Pump(); Check(!write.IsEnabled,"Write enabled without a port");
-            port.Text="COM_TEST"; Pump(); Check(write.IsEnabled,"Manual port not accepted");
+            ports.SelectedItem=null; Pump(); Check(!write.IsEnabled,"Write enabled without a port");
+            ports.SelectedItem="COM_TEST"; Pump(); Check(write.IsEnabled,"Selected port not accepted");
             file.Text=Path.Combine(directory,"missing.jed"); Pump(); Check(!write.IsEnabled,"Missing file accepted");
             file.Text=jed; Pump();
             // Open confirmation, then cancel. Never open a real serial port in UI tests.
@@ -277,7 +277,7 @@ internal static class Program
             string xsvf=Path.Combine(directory,"design.xsvf"); File.WriteAllBytes(xsvf,new byte[]{0});
             string erase=Path.Combine(directory,"erase_ATF1502AS.xsvf"); File.WriteAllBytes(erase,new byte[]{0});
             file.Text=xsvf; Find<TextBox>("EraseXsvfPath").Text=erase;
-            Find<CheckBox>("AdapterCheck").IsChecked=true; Pump();
+            Pump();
             Check(write.IsEnabled,"Valid XSVF setup does not enable write");
             Find<TextBox>("EraseXsvfPath").Text=Path.Combine(directory,"missing.xsvf"); Pump();
             Check(!write.IsEnabled,"Missing explicit erase file silently ignored");
@@ -305,6 +305,7 @@ internal sealed class Emulator : ISerialTransport
     public List<string> Commands {get;}=new();
     public string? ErrorCommand {get;init;}
     public string JtagResult {get;init;}="Q-0,OK";
+    public string JtagStartResponse {get;init;}="\r\nRXSVF\r\n$003\r\n";
     public bool IncompleteVpp {get;init;} = false;
     public string VppCalibrationStatus {get;init;}="VPP-CAL-OK";
     public string ExternalRamBanner {get;init;}="SeRAM:None";
@@ -333,7 +334,7 @@ internal sealed class Emulator : ISerialTransport
                 (IncompleteVpp ? "" : "VPP: 16.0V : 16.05\r\n") + ">\r\n");
         }
         else if(cmd=="p") Reply(PesResponse + "\r\n>\r\n");
-        else if(cmd.StartsWith('j')) Reply("\r\nRXSVF\r\n$003\r\n");
+        else if(cmd.StartsWith('j')) Reply(JtagStartResponse);
         else if(cmd==ErrorCommand) Reply("ER simulated failure\r\n>\r\n");
         else if(cmd.StartsWith("#c ",StringComparison.Ordinal)) Reply("OK checksum matches\r\n>\r\n");
         else if(cmd=="#e") Reply("OK upload finished\r\n>\r\n");

@@ -492,6 +492,15 @@ static void setGalDefaults(void);
 #endif
 
 
+// Explicit guarded declarations keep Arduino's prototype generator from
+// emitting declarations for functions omitted from small-board builds.
+#if CFG_USE_GAL600X
+static void writeGalFuseMap600(const unsigned char* cfgArray);
+#endif
+#if USE_JTAG_PLAYER
+static void startJtagPlayer(uint8_t vpp);
+#endif
+
 // Optional chip families must be rejected, not silently processed using a
 // generic read/write path when the smaller 32U4 build excludes their algorithms.
 static bool isGalTypeEnabledInBuild(GALTYPE type) {

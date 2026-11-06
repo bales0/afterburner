@@ -384,9 +384,9 @@ static int8_t varVppInit(void) {
 }
 
 //return 1 on success (VPP calibration appears correct), 0 on failure
-// Verify the EEPROM calibration with a REAL ADC reading at every boot.
-// Voltage control is returned to the safe 5 V/off index on ALL exit paths.
-// The hardware socket-power switch must remain OFF while the board starts.
+// Validate the EEPROM table without raising VPP at startup by default.
+// AFTB_VPP_ACTIVE_9V_AT_STARTUP=1 also measures 9 V, then returns to idle.
+// Keep socket power OFF during that optional active startup measurement.
 static int8_t varVppCheckCalibration(void) {
     varVppReadCalib();
     // A corrupt table must never be allowed to select an arbitrary VPP tap.
